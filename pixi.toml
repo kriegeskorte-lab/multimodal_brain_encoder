@@ -1,0 +1,62 @@
+[workspace]
+name = "brain"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[system-requirements]
+cuda = "12.4"
+
+[dependencies]
+python = "3.12.*"
+
+pytorch-gpu = "2.4.*"
+torchvision = "0.19.*"
+torchaudio = "2.4.*"
+cuda-version = "12.4.*"
+
+numpy = "1.26.*"
+pandas = "*"
+scipy = "*"
+matplotlib = "3.9.*"
+scikit-learn = "*"
+scikit-image = "*"
+seaborn = "*"
+pillow = "*"
+pyyaml = "*"
+requests = "*"
+tqdm = "*"
+
+notebook = "*"
+ipython = "*"
+ipykernel = "*"
+
+huggingface_hub = "*"
+transformers = "4.56.*"
+tokenizers = "0.22.*"
+accelerate = "*"
+safetensors = "*"
+sentencepiece = "*"
+ftfy = "*"
+
+datasets = "*"
+peft = "*"
+open-clip-torch = "*"
+
+h5py = "*"
+protobuf = "*"
+pydantic = "*"
+ffmpeg = "*"
+
+wandb = "*"
+torchmetrics = "*"
+
+easydict = "*"
+
+[pypi-dependencies]
+diffusers = ">=0.31,<0.32"
+librosa = "*"
+moviepy = "*"
+nilearn = "*"
+opencv-python = "==4.10.*"
+pytorchvideo = "*"
+einops = "*"

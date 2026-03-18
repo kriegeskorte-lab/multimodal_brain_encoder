@@ -1,0 +1,49 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+
+# Coverage / build artifacts
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Local OS/editor files
+.DS_Store
+*.swp
+
+# Common logs
+*.log
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# code
+docs/
+legacy/
+ckpt/
+wandb/
+kernel.json
+AGENT.md
+
+
