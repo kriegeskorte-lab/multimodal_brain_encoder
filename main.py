@@ -13,7 +13,7 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 from accelerate.utils import DistributedDataParallelKwargs
 ddp_kwargs = DistributedDataParallelKwargs(
-    find_unused_parameters=True
+    broadcast_buffers=False,   # avoids pre-forward _sync_buffers hangs
 )
 
 from torch import nn
@@ -25,12 +25,12 @@ from eval import evaluate
 from metric import mse_loss
 from train import train_one_epoch
 from models.neuro_encoder import NeuroEncoder
-from cneuro_dataset.cneuro_data import algonauts_dataset
+# from cneuro_dataset.cneuro_data import algonauts_dataset
+from cneuro_dataset.cneuro_data_1 import algonauts_dataset
 from models.multimodel_backbone import BACKBONE_LIST
 
 import warnings
 warnings.filterwarnings("ignore")
-
 
 class MSECriterion(nn.Module):
 	"""Pure MSE criterion. Ignores outputs['l2_reg'] by design."""
@@ -60,7 +60,9 @@ def build_dataloaders(args) -> Dict[str, DataLoader]:
 		"batch_size": args.batch_size,
 		"num_workers": args.num_workers,
 		"pin_memory": True,
-		"persistent_workers": args.num_workers > 0,
+		# "persistent_workers": args.num_workers > 0,
+		"persistent_workers": False,
+		"prefetch_factor": None if args.num_workers <= 1 else 2,  # default is 2, 
 	}
 
 	train_loader = DataLoader(train_dataset, shuffle=True, drop_last=True, **common)
@@ -149,18 +151,22 @@ def main() -> None:
 		args.save_checkpoints = False
 		args.save_test_predictions = False
 
-	time_tag = datetime.now().strftime("%m-%d-%Y-%H-%M")
-	output_dir = Path(args.ckpt_root) / str(args.subj) / time_tag
-	output_dir.mkdir(parents=True, exist_ok=True)
+	if args.resume is not None:
+		output_dir = Path(args.resume).parent
+	else:
+		time_tag = datetime.now().strftime("%m-%d-%Y-%H-%M")
+		output_dir = Path(args.ckpt_root) / str(args.subj) / time_tag
+		output_dir.mkdir(parents=True, exist_ok=True)
 
 	accelerator = Accelerator(log_with="wandb" if args.use_wandb else None, kwargs_handlers=[ddp_kwargs])
+	# accelerator = Accelerator(log_with="wandb" if args.use_wandb else None)
 	set_seed(args.seed)
 
 	if args.use_wandb:
 		accelerator.init_trackers(
 			project_name=args.wandb_project,
 			config=vars(args),
-			init_kwargs={"wandb": {"name": args.wandb_run_name}},
+			init_kwargs={"wandb": {"name": args.wandb_run_name + f'_{time_tag}' if args.wandb_run_name else time_tag}},
 		)
 
 	dataloaders = build_dataloaders(args)
@@ -268,6 +274,7 @@ def main() -> None:
 		accelerator.print(f"Loading best checkpoint from {best_ckpt_path}")
 		best_ckpt = torch.load(best_ckpt_path, map_location="cpu")
 		accelerator.unwrap_model(model).load_state_dict(best_ckpt["model"], strict=False)
+		accelerator.print(f"Best val acc from checkpoint {best_ckpt['epoch']}: {best_ckpt['best_val_acc']}")
 
 	test_stats = evaluate(
 		model=model,

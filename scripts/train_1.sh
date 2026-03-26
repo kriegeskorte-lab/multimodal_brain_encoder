@@ -8,8 +8,8 @@ set -euo pipefail
 SUBJ=1
 TARGET_SUBJ=1
 EPOCHS=15
-BATCH_SIZE=32
-NUM_WORKERS=0
+BATCH_SIZE=64
+NUM_WORKERS=4
 LR=1e-4
 STEP_SIZE=20
 STEP_SIZE_GAMMA=1.0 # do not change for now
@@ -19,7 +19,7 @@ VAL_SPLITS="friends-test-default"
 TEST_SPLITS="movie10-ood-default"
 
 MODALITY=(video audio text)
-VIDEO_BACKBONE="timesformer"
+VIDEO_BACKBONE="metaclip"
 AUDIO_BACKBONE="whisper"
 TEXT_BACKBONE="metaclip"
 
@@ -32,7 +32,7 @@ NUM_QUERIES=1000
 
 USE_WANDB="1"
 WANDB_PROJECT="multimodal-encoder"
-WANDB_RUN_NAME="train-sub${SUBJ}"
+WANDB_RUN_NAME="sub${SUBJ}"
 
 if [[ "$USE_WANDB" == "1" ]]; then
   WANDB_FLAGS=(--use_wandb --wandb_project "$WANDB_PROJECT" --wandb_run_name "$WANDB_RUN_NAME")
@@ -52,7 +52,7 @@ fi
 
 pixi run accelerate launch \
   --config_file .accelerate/config.yaml \
-  --main_process_port 29505 \
+  --main_process_port 29501 \
   main.py \
   --subj "$SUBJ" \
   --target_subj "$TARGET_SUBJ" \

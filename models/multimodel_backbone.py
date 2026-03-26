@@ -188,7 +188,6 @@ class FeatureWrapper(torch.nn.Module):
             if self.backbone == "llama":
                 return AutoModel.from_pretrained(
                     self.model_name,
-                    dtype=torch.float16,
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
                 )

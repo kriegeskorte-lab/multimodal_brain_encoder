@@ -3,34 +3,33 @@ set -euo pipefail
 
 # Eval-only script (loads checkpoint and runs evaluation/test path)
 # Example:
-#   RESUME=/ckpt/1/03-17-2026-14-30/best.pt ./scripts/eval.sh
+#   bash ./scripts/eval.sh
 
-if [[ -z "${RESUME:-}" ]]; then
-  echo "Error: set RESUME to a checkpoint path, e.g. RESUME=/ckpt/1/<time>/best.pt"
-  exit 1
-fi
+RESUME="ckpt/1/03-18-2026-02-20/best.pt" 
 
-SUBJ="${SUBJ:-1}"
-TARGET_SUBJ="${TARGET_SUBJ:-$SUBJ}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-NUM_WORKERS="${NUM_WORKERS:-2}"
-TRAIN_SPLITS="${TRAIN_SPLITS:-friends-train-default}"
-VAL_SPLITS="${VAL_SPLITS:-friends-test-default}"
-TEST_SPLITS="${TEST_SPLITS:-movie10-ood-default}"
+SUBJ=1
+TARGET_SUBJ=1
+BATCH_SIZE=32
+NUM_WORKERS=4
+TRAIN_SPLITS="friends-train-default"
+VAL_SPLITS="friends-test-default"
+TEST_SPLITS="movie10-ood-default"
 
-MODALITY="${MODALITY:-video audio text}"
-VIDEO_BACKBONE="${VIDEO_BACKBONE:-metaclip}"
-AUDIO_BACKBONE="${AUDIO_BACKBONE:-whisper}"
-TEXT_BACKBONE="${TEXT_BACKBONE:-metaclip}"
+MODALITY="video audio text"
+VIDEO_BACKBONE="metaclip"
+AUDIO_BACKBONE="whisper"
+TEXT_BACKBONE="metaclip"
 
-HIDDEN_DIM="${HIDDEN_DIM:-768}"
-DIM_FEEDFORWARD="${DIM_FEEDFORWARD:-1024}"
-ENC_LAYERS="${ENC_LAYERS:-0}"
-DEC_LAYERS="${DEC_LAYERS:-1}"
-NHEADS="${NHEADS:-16}"
-NUM_QUERIES="${NUM_QUERIES:-1000}"
+HIDDEN_DIM=256
+DIM_FEEDFORWARD=1024
+ENC_LAYERS=0
+DEC_LAYERS=4
+NHEADS=8
+NUM_QUERIES=1000
 
-accelerate launch main.py \
+pixi run accelerate launch \
+  --config_file .accelerate/config.yaml --main_process_port 0\
+  main.py \
   --eval_only \
   --resume "$RESUME" \
   --subj "$SUBJ" \

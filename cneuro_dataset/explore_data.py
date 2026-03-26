@@ -7,7 +7,8 @@ from torchvision import transforms
 
 import sys
 sys.path.append("/engram/nklab/pf2477")
-from multimodal_encoder.cneuro_dataset.cneuro_data import algonauts_dataset
+# from multimodal_encoder.cneuro_dataset.cneuro_data import algonauts_dataset
+from multimodal_encoder.cneuro_dataset.cneuro_data_1 import algonauts_dataset
 
 import logging
 logging.getLogger().setLevel(logging.ERROR)
@@ -37,7 +38,7 @@ class args_explore():
         self.image_size = 224
         self.data_dir = '/engram/nklab/hossein/recurrent_models/algonauts2025/'
         self.subj = 1
-        self.batch_size = 2
+        self.batch_size = 64
         self.modality = ['video', 'audio', 'text']
         self.num_workers = 0
         self.num_frames = 20

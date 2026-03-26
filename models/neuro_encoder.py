@@ -146,7 +146,30 @@ class PerceptualAligner(nn.Module):
 
         return x.masked_fill(~token_keep.unsqueeze(-1), 0.0)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, D]
 
+
+        x = self._modality_dropout(x, self.modality_dropout_prob)
+        B, T, _ = x.shape
+
+        src = x.transpose(1, 2).unsqueeze(-1)  # [B, D, T, 1] content
+        pos_embed = self.modality_embed.weight.unsqueeze(0).transpose(1, 2).unsqueeze(-1).repeat(B, 1, 1, 1)  # [B, D, T, 1]
+        query_embed = self.query_embed.weight    # [num_queries, D]
+        src_mask = torch.zeros(B, T, device=x.device, dtype=torch.bool)  # [B, T]
+
+        hidden_states = self.transformer(
+            src=src,
+            mask=src_mask, 
+            query_embed=query_embed,
+            pos_embed=pos_embed,
+            masks=False # feature-fusion flag (boolean)
+        )
+
+        outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
+        return self.output_norm(outputs)
+    
+    '''
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, T, D]
         x = self._modality_dropout(x, self.modality_dropout_prob)
@@ -176,6 +199,7 @@ class PerceptualAligner(nn.Module):
         # Expected [L, B, Q, D] if return_intermediate_dec=True.
         outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
         return self.output_norm(outputs)
+    '''
 
 class Readout(nn.Module):
     """Readout module that predicts fMRI from aligned token representations."""
