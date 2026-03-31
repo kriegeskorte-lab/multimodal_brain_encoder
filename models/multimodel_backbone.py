@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
+from unicodedata import name
 
 import torch
 from transformers import (
@@ -268,70 +269,53 @@ class FeatureWrapper(torch.nn.Module):
     def extract_features(self, inputs: TensorLikeDict, **kwargs: Any) -> Any:
         device = next(self.parameters()).device
         inputs = to_device(inputs, device)
-        
-        # only whisper has a encoder-decoder architecture
+
+        if self.modality == "video" and self.backbone in {"metaclip", "dino"}:
+            pixel_values = inputs["pixel_values"]
+            if pixel_values.ndim == 5:
+                batch_size, time_steps, channels, height, width = pixel_values.shape
+                inputs["pixel_values"] = pixel_values.reshape(
+                    batch_size * time_steps,
+                    channels,
+                    height,
+                    width,
+                )
+
+        if self.modality == "video" and self.backbone == "videomae":
+            with torch.no_grad():
+                hidden_states = self.model.model.patch_embed(inputs["pixel_values"])
+                hidden_states = self.model.model.pos_drop(hidden_states)
+                for block in self.model.model.blocks:
+                    hidden_states = block(hidden_states)
+            return hidden_states
+
         if self.modality == "audio" and self.backbone == "whisper":
             with torch.no_grad():
                 outputs = self.model.encoder(**inputs)
-            features = outputs.last_hidden_state.mean(dim=1)
-            return features
-
-        if self.modality == "video" and self.backbone in {"metaclip", "dino"}:
-            # batch_size = kwargs.get("batch_size")
-            # time_steps = kwargs.get("time_steps")
-            num_dim = inputs["pixel_values"].ndim
-            if num_dim == 5: # an issue of dataloader collating frames into a 5D tensor (B, T, C, H, W) instead of flattening them into (B*T, C, H, W)
-                B, T, C, H, W = inputs["pixel_values"].shape
-                inputs["pixel_values"] = inputs["pixel_values"].reshape(B * T, C, H, W)
-                # print(f"Input pixel values shape in feature extractor: {inputs['pixel_values'].shape}") # torch.Size([B * 16, 3, 224, 224])
-            
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        else:
+            with torch.no_grad():
+                outputs = self.model(**inputs)
 
         if self.modality == "text":
-            hidden = outputs.last_hidden_state
+            hidden_states = outputs.last_hidden_state
             attention_mask = inputs["attention_mask"]
-            if self.backbone == "llama":
-                # For causal LMs, use the last non-padding token representation.
-                seq_len = attention_mask.size(1)
-                positions = torch.arange(seq_len, device=attention_mask.device).unsqueeze(0)
-                last_token_idx = positions.masked_fill(attention_mask == 0, -1).max(dim=1).values
-                last_token_idx = last_token_idx.clamp(min=0)
-
-                batch_idx = torch.arange(hidden.size(0), device=hidden.device)
-                features = hidden[batch_idx, last_token_idx]
-                return features
-
-            mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
-            denom = mask.sum(dim=1).clamp_min(1e-6)
-            features = (hidden * mask).sum(dim=1) / denom
-            return features
+            mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+            return hidden_states * mask
 
         if self.modality == "audio":
-            features = outputs.last_hidden_state.mean(dim=1)
-            return features
+            return outputs.last_hidden_state
 
         if self.modality == "video" and self.backbone in {"metaclip", "dino"}:
             batch_size = kwargs.get("batch_size")
             time_steps = kwargs.get("time_steps")
-            # print(inputs["pixel_values"].shape) # torch.Size([32, 3, 224, 224]) after flattening frames
             if batch_size is None or time_steps is None:
                 raise ValueError("batch_size and time_steps are required for metaclip/dino video inference")
-            last_hidden_state = outputs.last_hidden_state
-            hidden_size = last_hidden_state.shape[-1]
-            last_hidden_state = last_hidden_state.reshape(batch_size, time_steps, -1, hidden_size)
-            features = last_hidden_state.mean(dim=(1, 2))
-            return features
+            hidden_states = outputs.last_hidden_state
+            hidden_size = hidden_states.shape[-1]
+            return hidden_states.reshape(batch_size, time_steps, -1, hidden_size)
 
         if self.modality == "video" and self.backbone == "timesformer":
-            features = outputs.last_hidden_state.mean(dim=1)
-            return features
-
-        if self.modality == "video" and self.backbone == "videomae":
-            if hasattr(outputs, "last_hidden_state"):
-                features = outputs.last_hidden_state.mean(dim=1)
-                return features
-            return outputs
+            return outputs.last_hidden_state
 
         raise ValueError(f"Unsupported modality/backbone pair for feature extraction: {self.modality}/{self.backbone}")
 
@@ -470,13 +454,13 @@ if __name__ == "__main__":
 
     # Toggle these for quick checks.
     tests = [
-        # ("text", "deberta"),
-        # ("text", "llama"),
-        # ("text", "metaclip"),
-        # ("audio", "wav2vec2"),
-        # ("audio", "whisper"),
-        # ("video", "videomae"),
-        # ("video", "timesformer"),
+        ("text", "deberta"),
+        ("text", "llama"),
+        ("text", "metaclip"),
+        ("audio", "wav2vec2"),
+        ("audio", "whisper"),
+        ("video", "videomae"),
+        ("video", "timesformer"),
         ("video", "dino"),
         ("video", "metaclip"),
     ]
@@ -490,40 +474,40 @@ if __name__ == "__main__":
 
 
 '''
-Testing text/deberta with model: microsoft/deberta-v3-large                                               
-Input keys: ['input_ids', 'token_type_ids', 'attention_mask']       
-Feature shape: torch.Size([2, 1024])                                
-==================================================                  
-Testing text/llama with model: meta-llama/Llama-3.2-1B              
-Input keys: ['input_ids', 'attention_mask']                         
-Feature shape: torch.Size([2, 2048])                                
-==================================================                  
-Testing text/metaclip with model: facebook/metaclip-2-worldwide-m16 
-Input keys: ['input_ids', 'attention_mask']                         
-Feature shape: torch.Size([2, 512])                                 
-==================================================
-Testing audio/wav2vec2 with model: facebook/wav2vec2-base-960h                 
-Input keys: ['input_values']                                                   
-Feature shape: torch.Size([2, 768])                                            
-==================================================                             
-Testing audio/whisper with model: openai/whisper-small                         
-Input keys: ['input_features']                                                 
-Feature shape: torch.Size([2, 768])                                            
-==================================================                             
-Testing video/dino with model: facebook/dinov3-vitb16-pretrain-lvd1689m        
-Input keys: ['pixel_values']                                                   
-Feature shape: torch.Size([2, 768])                                            
-==================================================                             
-Testing video/videomae with model: OpenGVLab/VideoMAEv2-Base                   
-Input keys: ['pixel_values']                                                   
-Feature shape: torch.Size([2, 768])                                            
-==================================================                             
-Testing video/timesformer with model: facebook/timesformer-base-finetuned-k400 
+Testing text/deberta with model: microsoft/deberta-v3-large                   
+Input keys: ['input_ids', 'token_type_ids', 'attention_mask']                 
+Feature shape: torch.Size([2, 512, 1024])                                     
+==================================================                            
+Testing text/llama with model: meta-llama/Llama-3.2-1B                        
+Input keys: ['input_ids', 'attention_mask']                                   
+Feature shape: torch.Size([2, 512, 2048])                                     
+==================================================                            
+Testing text/metaclip with model: facebook/metaclip-2-worldwide-m16           
+Input keys: ['input_ids', 'attention_mask']                                   
+Feature shape: torch.Size([2, 77, 512])                                       
+==================================================                            
+Testing audio/wav2vec2 with model: facebook/wav2vec2-base-960h                
+Input keys: ['input_values']                                                  
+Feature shape: torch.Size([2, 1539, 768])                                     
+==================================================                            
+Testing audio/whisper with model: openai/whisper-small                        
+Input keys: ['input_features']                                                
+Feature shape: torch.Size([2, 1500, 768])                                     
+==================================================                            
+Testing video/videomae with model: OpenGVLab/VideoMAEv2-Base                  
 Input keys: ['pixel_values']                                                  
-Feature shape: torch.Size([2, 768])                                            
-==================================================                             
-Testing video/metaclip with model: facebook/metaclip-2-worldwide-m16           
-Input keys: ['pixel_values']                                                   
-Feature shape: torch.Size([2, 512])                                            
+Feature shape: torch.Size([2, 1568, 768]) # 1568 = 8 temporal tokens * 14 * 14                                      
+==================================================                            
+Testing video/timesformer with model: facebook/timesformer-base-finetuned-k400
+Input keys: ['pixel_values']                                                  
+Feature shape: torch.Size([2, 3137, 768]) # 3137 = 16 frames * 14 * 14 + 1 (cls token)                               
+==================================================                            
+Testing video/dino with model: facebook/dinov3-vitb16-pretrain-lvd1689m       
+Input keys: ['pixel_values']                                                  
+Feature shape: torch.Size([2, 16, 201, 768])  # 201 = 14 * 14 + 1 (cls token) + 4 (registers)                               
+==================================================                            
+Testing video/metaclip with model: facebook/metaclip-2-worldwide-m16          
+Input keys: ['pixel_values']                                                  
+Feature shape: torch.Size([2, 16, 197, 512])  # 197 = 14 * 14 + 1 (cls token)                                    
 ================================================== 
 '''

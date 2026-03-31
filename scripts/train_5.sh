@@ -7,8 +7,8 @@ set -euo pipefail
 
 SUBJ=5
 TARGET_SUBJ=5
-EPOCHS=15
-BATCH_SIZE=64
+EPOCHS=10
+BATCH_SIZE=28
 NUM_WORKERS=4
 LR=1e-4
 STEP_SIZE=20
@@ -19,15 +19,16 @@ VAL_SPLITS="friends-test-default"
 TEST_SPLITS="movie10-ood-default"
 
 MODALITY=(video audio text)
-VIDEO_BACKBONE="metaclip"
+VIDEO_BACKBONE="dino"
 AUDIO_BACKBONE="whisper"
-TEXT_BACKBONE="metaclip"
+TEXT_BACKBONE="llama"
+MODALITY_DROPOUT=0.3
 
-HIDDEN_DIM=256
+HIDDEN_DIM=768
 DIM_FEEDFORWARD=1024
 ENC_LAYERS=0
 DEC_LAYERS=1
-NHEADS=8
+NHEADS=16
 NUM_QUERIES=1000
 
 USE_WANDB="1"
@@ -49,6 +50,7 @@ fi
 # export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 # export TORCH_NCCL_BLOCKING_WAIT=1
 # export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 pixi run accelerate launch \
   --config_file .accelerate/config.yaml \
@@ -76,4 +78,5 @@ pixi run accelerate launch \
   --dec_layers "$DEC_LAYERS" \
   --nheads "$NHEADS" \
   --num_queries "$NUM_QUERIES" \
+  --modality_dropout "$MODALITY_DROPOUT" \
   "${WANDB_FLAGS[@]}"

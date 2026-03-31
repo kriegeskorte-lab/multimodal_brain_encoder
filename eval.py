@@ -51,9 +51,10 @@ def evaluate(
         else:
             targets = targets.float()
 
-        outputs = model(samples)
-        pred = outputs["fmri_pred"]
-        loss = criterion(outputs, targets)
+        with accelerator.autocast():
+            outputs = model(samples)
+            pred = outputs["fmri_pred"]
+            loss = criterion(outputs, targets)
         batch_size = int(pred.shape[0])
         loss_meter.update(float(loss.detach().item()), batch_size)
         pearson_meter.update(pred, targets)

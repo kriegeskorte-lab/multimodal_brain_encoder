@@ -1,7 +1,6 @@
 import os
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -158,9 +157,10 @@ def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_s
             fmri_file,
         )
         # Load the the fMRI responses
-        with h5py.File(fmri_dir, "r") as fmri_friends:
-            for key, val in fmri_friends.items():
-                fmri[str(key[13:])] = {"parcel": np.asarray(val, dtype=np.float32)}
+        fmri_friends = h5py.File(fmri_dir, "r")
+        for key, val in fmri_friends.items():
+            fmri[str(key[13:])] = {"parcel": val[:].astype(np.float32)}
+        del fmri_friends
 
         ### Load the fMRI responses for Movie10 ###
         # Data directory
@@ -174,9 +174,10 @@ def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_s
             fmri_file,
         )
         # Load the the fMRI responses
-        with h5py.File(fmri_dir, "r") as fmri_movie10:
-            for key, val in fmri_movie10.items():
-                fmri[key[13:]] = {"parcel": np.asarray(val, dtype=np.float32)}
+        fmri_movie10 = h5py.File(fmri_dir, "r")
+        for key, val in fmri_movie10.items():
+            fmri[key[13:]] = {"parcel": val[:].astype(np.float32)}
+        del fmri_movie10
 
         # Average the fMRI responses across the two repeats for 'figures'
         keys_all = fmri.keys()
@@ -211,14 +212,12 @@ def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_s
             voxel_timeseries_file = Path(
                 f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/{movie_type}/Schaefer18_1000Parcels7Networks/sub-0{subject}/func/sub-0{subject}_voxel_timeseries_{gm}.h5"
             )
-            with h5py.File(voxel_timeseries_file, "r") as voxel_timeseries:
-                # print(list(voxel_timeseries["voxel"].keys())) # episode splits
-                for name in voxel_timeseries["voxel"].keys():
-                    if name not in fmri:   # initialize dictionary for this name
-                        fmri[name] = {}
-                    fmri[name]["voxel"] = np.asarray(
-                        voxel_timeseries["voxel"][name], dtype=np.float32
-                    )
+            voxel_timeseries = h5py.File(voxel_timeseries_file, "r")
+            # print(list(voxel_timeseries["voxel"].keys())) # episode splits
+            for name in voxel_timeseries["voxel"].keys():
+                if name not in fmri:   # initialize dictionary for this name
+                    fmri[name] = {}
+                fmri[name]["voxel"] = voxel_timeseries["voxel"][name]
 
     ### Output ###
     return fmri
@@ -282,7 +281,6 @@ class algonauts_dataset(Dataset):
         self.readout_res = args.readout_res
 
         self.timepoints = []
-        self.samples: List[Dict[str, object]] = []
 
         self.subj = args.subj
         self.fmri = {}
@@ -324,30 +322,7 @@ class algonauts_dataset(Dataset):
                 split_len = max([len(fmri[split]["parcel"]) for fmri in fmris if split in fmri])
             elif self.readout_res == "voxels":
                 split_len = max([len(fmri[split]["voxel"]) for fmri in fmris if split in fmri])
-            for i in range(split_len):
-
-                if self.readout_res == "parcels":
-                    available_subjects = [
-                        subj for subj in self.subject_ids
-                        if split in self.fmri[subj] and len(self.fmri[subj][split]["parcel"]) > i
-                    ]
-                else:
-                    available_subjects = [
-                        subj for subj in self.subject_ids
-                        if split in self.fmri[subj] and len(self.fmri[subj][split]["voxel"]) > i
-                    ]
-
-                if len(available_subjects) == 0:
-                    continue
-                self.timepoints.append([split, i])
-                self.samples.append(
-                    {
-                        "split": split,
-                        "ind": i,
-                        "available_subjects": available_subjects,
-                        "has_missing_targets": len(available_subjects) != len(self.subject_ids),
-                    }
-                )
+            self.timepoints += [[split, i] for i in range(split_len)]
 
         del fmris
 
@@ -422,92 +397,6 @@ class algonauts_dataset(Dataset):
             "movie10": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/movie10_smaller.h5",
         }
 
-        self.transcript_paths: Dict[str, str] = {}
-        self._transcript_cache: Dict[str, pd.DataFrame] = {}
-        for sample in self.samples:
-            split = str(sample["split"])
-            if split in self.transcript_paths:
-                continue
-            self.transcript_paths[split] = (
-                f"{root_data_dir}/algonauts_2025.competitors/stimuli/transcripts/"
-                + (f"friends/s{split[2]}/friends_{split}.tsv"
-                if re.match(r"^s\d\de\d\d[a-zA-Z]$", split)
-                else f"movie10/{split[:-2]}/movie10_{split}.tsv")
-            )
-
-        # Per-process worker-local HDF5 handles, lazily opened to avoid repeated open/close overhead.
-        self._stim_handles: Dict[Tuple[int, str], h5py.File] = {}
-
-        # Explicit compatibility behavior for missing per-subject targets.
-        # "mean_fill" preserves legacy behavior; "strict" raises an error for traceability.
-        self.missing_target_policy = str(getattr(args, "missing_target_policy", "mean_fill")).lower()
-        if self.missing_target_policy not in {"mean_fill", "strict"}:
-            raise ValueError(
-                f"Unsupported missing_target_policy: {self.missing_target_policy}. "
-                "Use one of ['mean_fill', 'strict']."
-            )
-
-    def _get_transcript_df(self, split: str) -> pd.DataFrame:
-        transcript_df = self._transcript_cache.get(split)
-        if transcript_df is None:
-            transcript_df = pd.read_csv(self.transcript_paths[split], sep="\t")
-            self._transcript_cache[split] = transcript_df
-        return transcript_df
-
-    def _movie_type_from_split(self, split: str) -> str:
-        return "friends" if re.match(r"^s\d\de\d\d[a-zA-Z]$", split) else "movie10"
-
-    def _get_stim_handle(self, split: str):
-        movie_type = self._movie_type_from_split(split)
-        pid = os.getpid()
-        key = (pid, movie_type)
-        handle = self._stim_handles.get(key)
-        if handle is None:
-            handle = h5py.File(self.stim_paths[movie_type], "r")
-            self._stim_handles[key] = handle
-        return handle
-
-    def _collect_fmri_targets(self, split: str, ind: int, available_subjects: List[int]):
-        fmri_data = {}
-        value_key = "parcel" if self.readout_res == "parcels" else "voxel"
-
-        available_arrays = []
-        for subj in available_subjects:
-            value = self.fmri[subj][split][value_key][ind]
-            if value is not None:
-                available_arrays.append(np.asarray(value, dtype=np.float32))
-
-        if len(available_arrays) == 0:
-            raise RuntimeError(f"No available targets for split={split}, ind={ind}")
-
-        fill_value = np.mean(available_arrays, axis=0).astype(np.float32)
-
-        for subj in self.subject_ids:
-            if subj in available_subjects:
-                value = self.fmri[subj][split][value_key][ind]
-                fmri_data[f"sub_{subj}"] = np.asarray(value, dtype=np.float32)
-            else:
-                if self.missing_target_policy == "strict":
-                    raise RuntimeError(
-                        f"Missing target for subject={subj}, split={split}, ind={ind} "
-                        f"under missing_target_policy='strict'."
-                    )
-                fmri_data[f"sub_{subj}"] = fill_value
-
-        return fmri_data
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["_stim_handles"] = {}
-        return state
-
-    def __del__(self):
-        for handle in self._stim_handles.values():
-            try:
-                handle.close()
-            except Exception:
-                pass
-
     def subsample_frames_lazy(
         self, stim, frames, start, end, split,
         sample_inds=np.array([
@@ -564,6 +453,8 @@ class algonauts_dataset(Dataset):
         # print(f"h5 loading in sample_frames_lazy: {time.perf_counter() - t0} seconds")
 
         # `frames_processed`: decoded raw RGB frames as tensors [3, H, W] per time step.
+        # `frames_v`: backbone-specific processed payload (usually under key `pixel_values`).
+        frames_v = {}
         frames = torch.stack(frames_processed).clone().contiguous()
         frames = F.interpolate(frames, size=(224, 224), mode='bilinear', align_corners=False)
         frames_pil = [to_pil_image(frame) for frame in frames]
@@ -601,24 +492,56 @@ class algonauts_dataset(Dataset):
         return inputs
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        split = str(sample["split"])
-        ind = int(sample["ind"])
-        available_subjects = list(sample["available_subjects"])
+        split, ind = self.timepoints[idx]
         data_point = {"split": split, "ind": ind}
 
-        # --- FMRI (explicit/traceable target policy) ---
-        fmri_data = self._collect_fmri_targets(split, ind, available_subjects)
+        # --- FMRI (unchanged) ---
+        fmri_data = {}
+        if self.fmri is not None:
+            if self.readout_res == "parcels":
+                for subj in self.fmri:
+                    if len(self.fmri[subj][split]["parcel"]) > ind:
+                        fmri_data[f"sub_{subj}"] = self.fmri[subj][split]["parcel"][ind]
+                    else:
+                        fmri_data[f"sub_{subj}"] = None
+                for subj in self.fmri:
+                    if fmri_data[f"sub_{subj}"] is None:
+                        fmri_data[f"sub_{subj}"] = np.mean(
+                            [v for v in fmri_data.values() if v is not None], axis=0
+                        )
+
+            elif self.readout_res == "voxels":
+                for subj in self.fmri:
+                    if len(self.fmri[subj][split]["voxel"]) > ind:
+                        fmri_data[f"sub_{subj}"] = self.fmri[subj][split]["voxel"][ind]
+                    else:
+                        fmri_data[f"sub_{subj}"] = None
+                for subj in self.fmri:
+                    if fmri_data[f"sub_{subj}"] is None:
+                        fmri_data[f"sub_{subj}"] = np.mean(
+                            [v for v in fmri_data.values() if v is not None], axis=0
+                        )
+
+                    fmri_data[f"sub_{subj}"] = fmri_data[f"sub_{subj}"].astype(np.float32)
+
+        # --- Text (unchanged) ---
+        # TODO part of this should not repeat for every sample
+        transcript_path = (
+            f"{root_data_dir}/algonauts_2025.competitors/stimuli/transcripts/"
+            + (f"friends/s{split[2]}/friends_{split}.tsv"
+            if re.match(r"^s\d\de\d\d[a-zA-Z]$", split)
+            else f"movie10/{split[:-2]}/movie10_{split}.tsv")
+        )
+
+        transcript_df = pd.read_csv(transcript_path, sep="\t")
+        context = extract_language_context(transcript_df, ind)
+
+        text_all = extract_text(context)
+        text = " ".join(text_all)
+        text = text if text.strip() else "[UNK]"
+
 
         if "text" in self.modality:
-            # --- Text (cached transcript table per split) ---
-            transcript_df = self._get_transcript_df(split)
-            context = extract_language_context(transcript_df, ind)
-
-            text_all = extract_text(context)
-            text = " ".join(text_all)
-            text = text if text.strip() else "[UNK]"
-
             if self.text_backbone in ["metaclip"]:
                 # Clip only allows for a certain number of tokens and then cuts off the text
                 text_all = extract_text(context, text_range=(5, 13)) # 
@@ -635,38 +558,41 @@ class algonauts_dataset(Dataset):
 
             text_inputs = {k: v.squeeze(0) for k, v in text_inputs.items() }
             data_point["text"] = text_inputs
+            
+        # --- Open h5py file INSIDE __getitem__ ---
+        movie_type = "friends" if re.match(r"^s\d\de\d\d[a-zA-Z]$", split) else "movie10"
+        stim_path = self.stim_paths[movie_type]
 
-        if ("video" in self.modality) or ("audio" in self.modality):
-            # --- Worker-safe lazy HDF5 handles ---
-            stim = self._get_stim_handle(split)
+        with h5py.File(stim_path, "r") as stim:
+            # --- Video ---
+            video_fps = stim[split]["video"].attrs["fps"]
+            end = int((ind + 1) * tr * video_fps)
+            start = max(int((ind - 14) * tr * video_fps), 0)
+            frames_ds = stim[split]["video"]
+
+            if self.sample_hrf:
+                mean, std = -150, 50
+                lower, upper = -669, 0
+                all_frames = np.arange(lower, upper)
+                a, b = (lower - mean) / std, (upper - mean) / std
+                probs = truncnorm.pdf(all_frames, a, b, loc=mean, scale=std)
+                probs /= probs.sum()
+                sample_inds = np.random.choice(all_frames, size=self.num_frames, p=probs, replace=False)
+                video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split, sample_inds)
+            else:
+                video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split)
 
             if "video" in self.modality:
-                # --- Video ---
-                video_fps = stim[split]["video"].attrs["fps"]
-                end = int((ind + 1) * tr * video_fps)
-                start = max(int((ind - 14) * tr * video_fps), 0)
-                frames_ds = stim[split]["video"]
-
-                if self.sample_hrf:
-                    mean, std = -150, 50
-                    lower, upper = -669, 0
-                    all_frames = np.arange(lower, upper)
-                    a, b = (lower - mean) / std, (upper - mean) / std
-                    probs = truncnorm.pdf(all_frames, a, b, loc=mean, scale=std)
-                    probs /= probs.sum()
-                    sample_inds = np.random.choice(all_frames, size=self.num_frames, p=probs, replace=False)
-                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split, sample_inds)
-                else:
-                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split)
-
                 data_point["video"] = video_inputs
+                # print("video shape in dataset: ", video_inputs["pixel_values"].shape)
+
+            # --- Audio ---
+            sr = stim[split]["audio"].attrs["sr"]
+            end_audio = int((ind + 1) * tr * sr)
+            start_audio = max(int((ind - 14) * tr * sr), 0)
+            audio = stim[split]["audio"][start_audio:end_audio]
 
             if "audio" in self.modality:
-                # --- Audio ---
-                sr = stim[split]["audio"].attrs["sr"]
-                end_audio = int((ind + 1) * tr * sr)
-                start_audio = max(int((ind - 14) * tr * sr), 0)
-                audio = np.asarray(stim[split]["audio"][start_audio:end_audio])
                 audio_inputs = self.transform_audio(audio, sr)
                 data_point["audio"] = audio_inputs
 
@@ -674,7 +600,7 @@ class algonauts_dataset(Dataset):
 
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.timepoints)
 
 
 

@@ -20,6 +20,11 @@ DEC_LAYERS=1
 NHEADS=8
 NUM_QUERIES=1000
 
+MODALITY=(video audio text)
+VIDEO_BACKBONE="dino"
+AUDIO_BACKBONE="wav2vec2"
+TEXT_BACKBONE="deberta"
+
 # bash scripts/sanity_check.sh
 pixi run accelerate launch \
   --config_file .accelerate/config.yaml \
@@ -36,4 +41,8 @@ pixi run accelerate launch \
   --enc_layers "$ENC_LAYERS" \
   --dec_layers "$DEC_LAYERS" \
   --nheads "$NHEADS" \
-  --num_queries "$NUM_QUERIES"
+  --num_queries "$NUM_QUERIES" \
+  --modality "${MODALITY[@]}" \
+  --video_backbone "$VIDEO_BACKBONE" \
+  --audio_backbone "$AUDIO_BACKBONE" \
+  --text_backbone "$TEXT_BACKBONE" \

@@ -49,8 +49,9 @@ def train_one_epoch(
         else:
             targets = targets.float()
 
-        outputs = model(samples)
-        loss = criterion(outputs, targets)
+        with accelerator.autocast():
+            outputs = model(samples)
+            loss = criterion(outputs, targets)
 
         optimizer.zero_grad(set_to_none=True)
         accelerator.backward(loss)

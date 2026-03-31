@@ -10,6 +10,8 @@ from torch import nn
 import sys
 sys.path.append("/engram/nklab/pf2477")
 
+from multimodal_encoder.args import get_args_parser
+from multimodal_encoder.cneuro_dataset.cneuro_data import algonauts_dataset
 from multimodal_encoder.utils.utils import NestedTensor
 from multimodal_encoder.models.transformer import build_transformer
 from multimodal_encoder.models.multimodel_backbone import BACKBONE_LIST, ProcessorWrapper, FeatureWrapper, to_device
@@ -44,6 +46,7 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.video_proj = nn.LazyLinear(self.d_model)
             self.video_layernorm = nn.LayerNorm(self.d_model)
+            self.video_model.model.eval()
             
         if "audio" in self.modality:
             self.audio_model = FeatureWrapper(
@@ -55,6 +58,7 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.audio_proj = nn.LazyLinear(self.d_model)
             self.audio_layernorm = nn.LayerNorm(self.d_model)
+            self.audio_model.model.eval()
             
         if "text" in self.modality: 
             self.text_model = FeatureWrapper(
@@ -66,6 +70,7 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.text_proj = nn.LazyLinear(self.d_model)
             self.text_layernorm = nn.LayerNorm(self.d_model)
+            self.text_model.model.eval()
 
         # LayerNorm can help stabilize training in multimodal fusion.
         self.multimodal_projector = nn.ModuleDict()
@@ -100,21 +105,22 @@ class Sensor(nn.Module):
 
     def forward(self, samples: NestedTensor) -> torch.Tensor:
         device = next(self.parameters()).device
-        modality_tokens: List[torch.Tensor] = []
+        modality_tokens = {
+            "video": None,
+            "audio": None,
+            "text": None,
+        }
 
         if "video" in self.modality:
-            modality_tokens.append(self._encode_video(samples, device))
+            modality_tokens["video"] = self._encode_video(samples, device)
 
         if "audio" in self.modality:
-            modality_tokens.append(self._encode_audio(samples, device))
+            modality_tokens["audio"] = self._encode_audio(samples, device)
 
         if "text" in self.modality:
-            modality_tokens.append(self._encode_text(samples, device))
+            modality_tokens["text"] = self._encode_text(samples, device)
 
-        if len(modality_tokens) == 0:
-            raise ValueError("No enabled modality tokens found. Check args.modality.")
-
-        return torch.stack(modality_tokens, dim=1)  # [B, num_modalities, d_model]
+        return modality_tokens
 
 
 class PerceptualAligner(nn.Module):
@@ -123,83 +129,250 @@ class PerceptualAligner(nn.Module):
     def __init__(self, args):
         super().__init__()
 
+        self.args = args
+        self.modality = args.modality
         self.d_model = args.hidden_dim
         self.output_norm = nn.LayerNorm(self.d_model)
         self.transformer = build_transformer(args)
         self.modality_dropout_prob = float(getattr(args, "modality_dropout", 0.2))
-        self.modality_embed = nn.Embedding(len(args.modality), self.d_model) # add modality position info to keys (memory) inside transformer
         self.query_embed = nn.Embedding(args.num_queries, self.d_model) # learned positional embedding for query slots.
+        self._build_pos_embedding()
+        self.pos_embed = None  
 
-    def _modality_dropout(self, x: torch.Tensor, dropout_prob: float) -> torch.Tensor:
-        # Modality token dropout on [B, T, D]. Drops whole modalities per sample.
-        if (not self.training) or dropout_prob <= 0.0:
-            return x
+    def _build_pos_embedding(self):
+        self.model2sequence_length = {
+            "wav2vec2": 1539,
+            "whisper": 1500,
+            "deberta": 512,
+            "llama": 512,
+            "metacliptext": 77,
+            "metaclipvision": 197,
+            "timesformer": 3137,
+            "videomae": 1568,
+            "dino": 201,
+        }
+        if "audio" in self.modality:
+            self.audio_backbone = self.args.audio_backbone.lower()
+            num_audio_tokens = self.model2sequence_length[self.audio_backbone]
+            self.audio_pos_embedding = nn.Embedding(num_audio_tokens, self.d_model)
+        if "text" in self.modality: 
+            self.text_backbone = self.args.text_backbone.lower()
+            if self.text_backbone == 'metaclip':
+                num_text_tokens = self.model2sequence_length["metacliptext"]
+            else:
+                num_text_tokens = self.model2sequence_length[self.text_backbone]
+            self.text_pos_embedding = nn.Embedding(num_text_tokens, self.d_model)
+        if "video" in self.modality:
+            self.video_backbone = self.args.video_backbone.lower()
+            # Current models all use 14x14 = 196 patch tokens per temporal step/frame.
+            self.video_num_spatial = 196
 
-        B, T, _ = x.shape
-        token_keep = torch.rand(B, T, device=x.device) > dropout_prob
+            if self.video_backbone == "videomae":
+                # 16 frames with tubelet_size=2 -> 8 temporal tokens
+                self.video_num_temporal = 8
+                self.video_num_special = 0
 
-        all_dropped = ~token_keep.any(dim=1)
+            elif self.video_backbone == "timesformer":
+                # 16 frames, flattened later; 1 CLS token total
+                self.video_num_temporal = 16
+                self.video_num_special = 1
+
+            elif self.video_backbone == "dino":
+                # 16 frames, per frame: 1 CLS + 4 register + 196 patch tokens
+                self.video_num_temporal = 16
+                self.video_num_special = 5
+
+            elif self.video_backbone == "metaclip":
+                # 16 frames, per frame: 1 CLS + 196 patch tokens
+                self.video_num_temporal = 16
+                self.video_num_special = 1
+            else:
+                raise ValueError(f"Unsupported video backbone: {self.video_backbone}")
+
+            self.video_temporal_embed = nn.Embedding(self.video_num_temporal, self.d_model)
+            self.video_spatial_embed = nn.Embedding(self.video_num_spatial, self.d_model)
+
+            if self.video_num_special > 0:
+                self.video_special_embed = nn.Embedding(self.video_num_special, self.d_model)
+            else:
+                self.video_special_embed = None
+
+            self.get_video_pos_encoding = self._build_video_pos_embedding()
+
+    def _build_video_pos_embedding(self):
+        """
+        Build video positional embeddings matching the shape of video_tokens.
+
+        Inputs by backbone:
+            videomae:   [B, 1568, D]        = [B, 8 * 196, D]
+            timesformer:[B, 3137, D]        = [B, 1 + 16 * 196, D]
+            dino:       [B, 16, 201, D]     = [B, 16, 5 + 196, D]
+            metaclip:   [B, 16, 197, D]     = [B, 16, 1 + 196, D]
+        Outputs: 
+            pos_embed:  [1568, D]        = [8 * 196, D]
+            pos_embed:  [3137, D]        = [1 + 16 * 196, D]
+            pos_embed:  [16, 201, D]     = [16, 5 + 196, D]
+            pos_embed:  [16, 197, D]     = [16, 1 + 196, D]
+        """
+        def build() -> torch.Tensor:
+
+            if self.video_backbone == "videomae":
+                temp = self.video_temporal_embed.weight[:, None, :]  # [T,1,D]
+                spat = self.video_spatial_embed.weight[None, :, :]    # [1,S,D]
+                pos = (temp + spat).reshape(self.video_num_temporal * self.video_num_spatial, self.d_model)
+                return pos  # [1568, D]
+
+            if self.video_backbone == "timesformer":
+                temp = self.video_temporal_embed.weight[:, None, :]  # [T,1,D]
+                spat = self.video_spatial_embed.weight[None, :, :]    # [1,S,D]
+                patch = (temp + spat).reshape(self.video_num_temporal * self.video_num_spatial, self.d_model)  # [3136, D]
+                cls = self.video_special_embed.weight  # [1, D]
+                return torch.cat([cls, patch], dim=0)  # [3137, D]
+
+            if self.video_backbone == "dino":
+                temp = self.video_temporal_embed.weight[:, None, :]  # [T,1,D]
+                special = self.video_special_embed.weight  # [5, D]
+                spatial = self.video_spatial_embed.weight  # [196, D]
+                frame = torch.cat([special, spatial], dim=0)  # [201, D]
+                return frame.unsqueeze(0) + temp  # [16, 201, D]
+
+            if self.video_backbone == "metaclip":
+                temp = self.video_temporal_embed.weight[:, None, :]  # [T,1,D]
+                special = self.video_special_embed.weight  # [1, D]
+                spatial = self.video_spatial_embed.weight  # [196, D]
+                frame = torch.cat([special, spatial], dim=0)  # [197, D]
+                return frame.unsqueeze(0) + temp  # [16, 197, D]
+
+            raise ValueError(f"Unsupported video backbone: {self.video_backbone}")
+
+        return build
+
+    def modality_dropout(self, video, audio, text, p):
+        keep_map = {
+            "video": None if video is None else None,
+            "audio": None if audio is None else None,
+            "text": None if text is None else None,
+        }
+        if not self.training or p <= 0:
+            if video is not None:
+                keep_map["video"] = torch.ones(video.shape[0], device=video.device, dtype=torch.bool)
+            if audio is not None:
+                keep_map["audio"] = torch.ones(audio.shape[0], device=audio.device, dtype=torch.bool)
+            if text is not None:
+                keep_map["text"] = torch.ones(text.shape[0], device=text.device, dtype=torch.bool)
+            return video, audio, text, keep_map
+
+        modalities = [video, audio, text]
+        present = [i for i, m in enumerate(modalities) if m is not None]
+        assert len(present) > 0, "At least one modality must be present"
+
+        B = modalities[present[0]].shape[0]
+        device = modalities[present[0]].device
+        keep = torch.rand(B, len(present), device=device) > p  # per-sample, per-present-modality
+
+        # ensure at least one modality survives per sample
+        all_dropped = ~keep.any(dim=1)
         if all_dropped.any():
-            dropped_rows = all_dropped.nonzero(as_tuple=False).squeeze(1)
-            rescue_cols = torch.randint(T, (dropped_rows.numel(),), device=x.device)
-            token_keep[dropped_rows, rescue_cols] = True
+            idx = all_dropped.nonzero(as_tuple=False).squeeze(1)
+            rescue = torch.randint(0, len(present), (idx.numel(),), device=device)
+            keep[idx, rescue] = True
 
-        return x.masked_fill(~token_keep.unsqueeze(-1), 0.0)
+        for col, m_idx in enumerate(present):
+            m = modalities[m_idx]
+            if m is not None:
+                scale_shape = [B] + [1] * (m.ndim - 1)
+                modalities[m_idx] = m * keep[:, col].view(*scale_shape)
+                if m_idx == 0:
+                    keep_map["video"] = keep[:, col]
+                elif m_idx == 1:
+                    keep_map["audio"] = keep[:, col]
+                else:
+                    keep_map["text"] = keep[:, col]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, T, D]
+        return modalities[0], modalities[1], modalities[2], keep_map
+    
+    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        # x: dict of modality -> tokens; video may be [B, F, S, D]
 
+        video_x = x.get("video", None)
+        audio_x = x.get("audio", None)
+        text_x  = x.get("text", None)
 
-        x = self._modality_dropout(x, self.modality_dropout_prob)
-        B, T, _ = x.shape
+        # add positional encodings per modality
+        if video_x is not None:
+            pos = self.get_video_pos_encoding()  # [S, D] or [F, S, D] depending on backbone
+            video_x = video_x + pos.unsqueeze(0)
+            if video_x.ndim == 4:
+                Bv, F, S, Dv = video_x.shape
+                video_x = video_x.reshape(Bv, F * S, Dv)
 
-        src = x.transpose(1, 2).unsqueeze(-1)  # [B, D, T, 1] content
-        pos_embed = self.modality_embed.weight.unsqueeze(0).transpose(1, 2).unsqueeze(-1).repeat(B, 1, 1, 1)  # [B, D, T, 1]
-        query_embed = self.query_embed.weight    # [num_queries, D]
-        src_mask = torch.zeros(B, T, device=x.device, dtype=torch.bool)  # [B, T]
+        if audio_x is not None:
+            audio_pos = self.audio_pos_embedding.weight  # [Ta, D]
+            audio_x = audio_x + audio_pos.unsqueeze(0)
 
-        hidden_states = self.transformer(
-            src=src,
-            mask=src_mask, 
-            query_embed=query_embed,
-            pos_embed=pos_embed,
-            masks=False # feature-fusion flag (boolean)
+        if text_x is not None:
+            text_pos = self.text_pos_embedding.weight    # [Tt, D]
+            text_x = text_x + text_pos.unsqueeze(0)
+
+        # modality dropout after positional encodings (per sample, whole modality)
+        video_x, audio_x, text_x, keep_map = self.modality_dropout(
+            video_x, audio_x, text_x, self.modality_dropout_prob
         )
 
-        outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
-        return self.output_norm(outputs)
-    
-    '''
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, T, D]
-        x = self._modality_dropout(x, self.modality_dropout_prob)
-        B, T, _ = x.shape
-        # print(x)
+        tokens = []
+        src_masks = []
+
+        if video_x is not None:
+            Bv = video_x.shape[0]
+            tokens.append(video_x)
+            video_len = video_x.shape[1]
+            video_keep = keep_map["video"]
+            video_mask = (~video_keep).unsqueeze(1).expand(Bv, video_len)
+            src_masks.append(video_mask)
+
+        if audio_x is not None:
+            Ba = audio_x.shape[0]
+            tokens.append(audio_x)
+            audio_len = audio_x.shape[1]
+            audio_keep = keep_map["audio"]
+            audio_mask = (~audio_keep).unsqueeze(1).expand(Ba, audio_len)
+            src_masks.append(audio_mask)
+
+        if text_x is not None:
+            Bt = text_x.shape[0]
+            tokens.append(text_x)
+            text_len = text_x.shape[1]
+            text_keep = keep_map["text"]
+            text_mask = (~text_keep).unsqueeze(1).expand(Bt, text_len)
+            src_masks.append(text_mask)
+
+        if len(tokens) == 0:
+            raise ValueError("No modalities available after dropout.")
+
+        x_cat = torch.cat(tokens, dim=1)  # [B, T, D]
+        B, T, _ = x_cat.shape
 
         # Adapt [B, T, D] to DETR-like interface expected by existing transformer.
-        src = x.transpose(1, 2).unsqueeze(-1)  # [B, D, T, 1] content
+        src = x_cat.transpose(1, 2).unsqueeze(-1)  # [B, D, T, 1] content
 
-        # [B, D] -> [1, B, D] -> [1, B, D, 1] -> [B, D, T, 1], added to keys inside transformer (memory + pos)
-        pos_embed = self.modality_embed.weight.unsqueeze(0).transpose(1, 2).unsqueeze(-1).repeat(B, 1, 1, 1)  # [B, D, T, 1]
+        # attention padding mask
+        src_mask = torch.cat(src_masks, dim=1).to(device=x_cat.device, dtype=torch.bool)  # [B, T]
 
         # learnable query embeddings, expected shape [num_queries, D]
         query_embed = self.query_embed.weight    # [num_queries, D]
 
-        # attention padding mask
-        src_mask = torch.zeros(B, T, device=x.device, dtype=torch.bool)  # [B, T]
-
         hidden_states = self.transformer(
             src=src,
             mask=src_mask, 
             query_embed=query_embed,
-            pos_embed=pos_embed,
+            pos_embed=None, # pos_embed is added to src tokens above;
             masks=False # feature-fusion flag (boolean)
         )
 
         # Expected [L, B, Q, D] if return_intermediate_dec=True.
         outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
         return self.output_norm(outputs)
-    '''
+    
 
 class Readout(nn.Module):
     """Readout module that predicts fMRI from aligned token representations."""
@@ -218,9 +391,10 @@ class Readout(nn.Module):
         # aligned_tokens: [B, Q, D], with Q expected to match fmri_out_dim.
         fmri_pred = self.readout_head(aligned_tokens).squeeze(-1)  # [B, Q]
         
-        l2_reg = torch.tensor(0.0, device=fmri_pred.device)
-        for p in self.readout_head.parameters():
-            l2_reg = l2_reg + torch.norm(p)
+        # l2_reg = torch.tensor(0.0, device=fmri_pred.device)
+        # for p in self.readout_head.parameters():
+        #     l2_reg = l2_reg + torch.norm(p)
+        l2_reg = None
 
         return fmri_pred, l2_reg
 
@@ -261,29 +435,45 @@ if __name__ == "__main__":
     # Lightweight shape tests using pseudo tokens (no backbone downloads).
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    args = SimpleNamespace(
-        # Model dims
-        hidden_dim=256,
-        num_queries=1000,
-        modality=["video", "audio", "text"],
-        modality_dropout=0.2,
-        readout_res="parcels",
-        dim_feedforward=1024,
-        # Transformer args used by build_transformer
-        dropout=0.1,
-        nheads=8,
-        enc_layers=0,
-        dec_layers=2,
-        pre_norm=True,
-        enc_output_layer=-1,
-        # Backbones (won't be used in this test, but required to initialize Sensor/Aligner)
-        text_backbone = random.choice(list(BACKBONE_LIST['text'].keys())),
-        video_backbone = random.choice(list(BACKBONE_LIST['video'].keys())),
-        audio_backbone = random.choice(list(BACKBONE_LIST['audio'].keys())),
-    )
+    parser = get_args_parser()
+    args = parser.parse_args()
+    args.test_splits = ["life"]
+    args.backbone_list = BACKBONE_LIST
+    # args.text_backbone = random.choice(list(BACKBONE_LIST['text'].keys()))
+    # args.video_backbone = random.choice(list(BACKBONE_LIST['video'].keys()))
+    # args.audio_backbone = random.choice(list(BACKBONE_LIST['audio'].keys()))
+    args.text_backbone = "llama"
+    args.video_backbone = "dino"
+    args.audio_backbone = "whisper"
+    print(f"video_backbone: {args.video_backbone}, text_backbone: {args.text_backbone}, audio_backbone: {args.audio_backbone}")
+    test_dataset = algonauts_dataset(args, include_splits=args.test_splits)
+    common = {
+		"batch_size": 2,
+		"num_workers": 2,
+		"pin_memory": True,
+		# "persistent_workers": args.num_workers > 0,
+		"persistent_workers": False,
+		"prefetch_factor": None,  # default is 2, 
+	}
+    from torch.utils.data import DataLoader
+    test_loader = DataLoader(test_dataset, shuffle=False, drop_last=False, **common)
 
-    B, T, D = 4, 3, args.hidden_dim
-    x = torch.randn(B, T, D, device=device)
+    sensor = Sensor(args).to(device)
+    for samples, targets in test_loader:
+        print(samples.keys())
+        multimodal_tokens = sensor(samples)
+        for modality, tokens in multimodal_tokens.items():
+            print(f"{modality} tokens shape: {tokens.shape}")
+        break  # just one batch for a quick check
+    '''
+    video tokens shape: torch.Size([2, 16, 197, 256]) 
+    audio tokens shape: torch.Size([2, 1500, 256])    
+    text tokens shape: torch.Size([2, 77, 256])
+    '''
+
+    B, D = 2, args.hidden_dim
+    # x = torch.randn(B, T, D, device=device)
+    x = multimodal_tokens
 
     aligner = PerceptualAligner(args).to(device)
     readout = Readout(args, d_model=D, fmri_out_dim=args.num_queries).to(device)
@@ -292,13 +482,11 @@ if __name__ == "__main__":
     aligner.eval()
     with torch.no_grad():
         aligned = aligner(x)
-        fmri_pred, l2_reg = readout(aligned)
+        fmri_pred, _ = readout(aligned)
 
     print("=== Shape check (eval) ===")
-    print(f"Input multimodal tokens: {x.shape} (expected [B, T, D])")
     print(f"Aligned tokens: {aligned.shape} (expected [B, Q, D])")
     print(f"fMRI prediction: {fmri_pred.shape} (expected [B, Q])")
-    print(f"L2 reg: {l2_reg.item():.6f} (scalar tensor)")
 
     assert aligned.shape == (B, args.num_queries, D), "PerceptualAligner output shape mismatch"
     assert fmri_pred.shape == (B, args.num_queries), "Readout output shape mismatch"
@@ -316,4 +504,5 @@ if __name__ == "__main__":
     assert torch.isfinite(fmri_pred_train).all(), "NaN/Inf detected in fmri_pred_train"
 
     print("All pseudo-data shape checks passed.")
+    
 
