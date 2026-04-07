@@ -19,7 +19,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import sys
 sys.path.append("/engram/nklab/pf2477")
-from multimodal_encoder.models.multimodel_backbone import ProcessorWrapper, FeatureWrapper
+from multimodal_encoder.models.multimodel_backbone import ProcessorWrapper, FeatureWrapper, video2frames_defaults
 
 import h5py
 import re
@@ -119,6 +119,10 @@ def _split_is_selected(split, include_tokens, exclude_tokens):
     if exclude_tokens and any(_split_matches_token(split, tok) for tok in exclude_tokens):
         return False
     return True
+
+
+def _movie_type_from_split_name(split: str) -> str:
+    return "friends" if re.match(r"^s\d\de\d\d[a-zA-Z]$", split) else "movie10"
 
 
 def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_split=None):
@@ -224,6 +228,33 @@ def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_s
     return fmri
 
 
+def load_voxel_index(subject, include_split=None, exclude_split=None):
+    """Build lightweight voxel metadata index (no eager voxel array loading)."""
+    assert include_split is None or exclude_split is None, (
+        "Cannot specify both include_split and exclude_split."
+    )
+
+    include_tokens = _normalize_split_spec(include_split)
+    exclude_tokens = _normalize_split_spec(exclude_split)
+
+    fmri = {}
+    gm = "gm"
+    for movie_type in ["friends", "movie10"]:
+        voxel_timeseries_file = Path(
+            f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/{movie_type}/Schaefer18_1000Parcels7Networks/sub-0{subject}/func/sub-0{subject}_voxel_timeseries_{gm}.h5"
+        )
+        with h5py.File(voxel_timeseries_file, "r") as voxel_timeseries:
+            for name in voxel_timeseries["voxel"].keys():
+                if not _split_is_selected(name, include_tokens, exclude_tokens):
+                    continue
+                fmri[name] = {
+                    "voxel_len": int(voxel_timeseries["voxel"][name].shape[0]),
+                    "movie_type": movie_type,
+                }
+
+    return fmri
+
+
 def extract_text(text, text_range=None):
     df = pd.DataFrame(list(text.items()), columns=["tr", "text_per_tr"])
     ### Load the transcript ###
@@ -286,6 +317,7 @@ class algonauts_dataset(Dataset):
 
         self.subj = args.subj
         self.fmri = {}
+        self.voxel_h5_paths: Dict[int, Dict[str, Path]] = {}
 
         self.backbone_list = args.backbone_list
 
@@ -308,7 +340,23 @@ class algonauts_dataset(Dataset):
 
         fmris = []
         for subj in self.subject_ids:
-            fmri = load_fmri(root_data_dir, subj, self.readout_res)
+            if self.readout_res == "voxels":
+                fmri = load_voxel_index(
+                    subj,
+                    include_split=include_tokens if include_tokens else None,
+                    exclude_split=exclude_tokens if exclude_tokens else None,
+                )
+                gm = "gm"
+                self.voxel_h5_paths[subj] = {
+                    "friends": Path(
+                        f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/friends/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
+                    ),
+                    "movie10": Path(
+                        f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/movie10/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
+                    ),
+                }
+            else:
+                fmri = load_fmri(root_data_dir, subj, self.readout_res)
             self.fmri[subj] = fmri
             fmris.append(fmri)
 
@@ -323,7 +371,7 @@ class algonauts_dataset(Dataset):
             if self.readout_res == "parcels":
                 split_len = max([len(fmri[split]["parcel"]) for fmri in fmris if split in fmri])
             elif self.readout_res == "voxels":
-                split_len = max([len(fmri[split]["voxel"]) for fmri in fmris if split in fmri])
+                split_len = max([fmri[split]["voxel_len"] for fmri in fmris if split in fmri])
             for i in range(split_len):
 
                 if self.readout_res == "parcels":
@@ -334,7 +382,7 @@ class algonauts_dataset(Dataset):
                 else:
                     available_subjects = [
                         subj for subj in self.subject_ids
-                        if split in self.fmri[subj] and len(self.fmri[subj][split]["voxel"]) > i
+                        if split in self.fmri[subj] and self.fmri[subj][split]["voxel_len"] > i
                     ]
 
                 if len(available_subjects) == 0:
@@ -407,7 +455,7 @@ class algonauts_dataset(Dataset):
             )
 
             # Temporal length expected by video transformers (configurable).
-            self.video_target_frames = int(getattr(args, "video_target_frames", 16))
+            self.video_target_frames = video2frames_defaults.get(video_backbone, 16)
 
         self.parcellation = np.load(
             f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/movie10/Schaefer18_1000Parcels7Networks/sub-{self.reference_subj:02}/func/schaefer_parcellation.npy"
@@ -416,10 +464,19 @@ class algonauts_dataset(Dataset):
             f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/movie10/Schaefer18_1000Parcels7Networks/sub-{self.reference_subj:02}/func/epi_mask.npy"
         )
         self.masked_parcellation = self.parcellation[self.epi_mask.astype(bool)]
+        self.valid_voxel_mask = self.masked_parcellation > 0
+        # if self.readout_res == "voxels":
+        #     self.masked_parcellation = self.masked_parcellation[self.valid_voxel_mask]
+        #     if self.masked_parcellation.size == 0:
+        #         raise ValueError("No valid voxels found after filtering masked_parcellation > 0.")
+        #     self.num_valid_voxels = int(self.masked_parcellation.shape[0])
+        # else:
+        #     self.num_valid_voxels = int(self.masked_parcellation.shape[0])
 
         self.stim_paths = {
             "friends": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/friends_smaller.h5",
             "movie10": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/movie10_smaller.h5",
+            "ood": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/ood_smaller.h5",
         }
 
         self.transcript_paths: Dict[str, str] = {}
@@ -437,6 +494,7 @@ class algonauts_dataset(Dataset):
 
         # Per-process worker-local HDF5 handles, lazily opened to avoid repeated open/close overhead.
         self._stim_handles: Dict[Tuple[int, str], h5py.File] = {}
+        self._voxel_handles: Dict[Tuple[int, int, str], h5py.File] = {}
 
         # Explicit compatibility behavior for missing per-subject targets.
         # "mean_fill" preserves legacy behavior; "strict" raises an error for traceability.
@@ -455,7 +513,7 @@ class algonauts_dataset(Dataset):
         return transcript_df
 
     def _movie_type_from_split(self, split: str) -> str:
-        return "friends" if re.match(r"^s\d\de\d\d[a-zA-Z]$", split) else "movie10"
+        return _movie_type_from_split_name(split)
 
     def _get_stim_handle(self, split: str):
         movie_type = self._movie_type_from_split(split)
@@ -467,15 +525,42 @@ class algonauts_dataset(Dataset):
             self._stim_handles[key] = handle
         return handle
 
+    def _get_voxel_handle(self, subj: int, split: str):
+        movie_type = self._movie_type_from_split(split)
+        pid = os.getpid()
+        key = (pid, subj, movie_type)
+        handle = self._voxel_handles.get(key)
+        if handle is None:
+            handle = h5py.File(self.voxel_h5_paths[subj][movie_type], "r")
+            self._voxel_handles[key] = handle
+        return handle
+
+    def _get_voxel_row(self, subj: int, split: str, ind: int) -> np.ndarray:
+        handle = self._get_voxel_handle(subj, split)
+        voxel_row = np.asarray(handle["voxel"][split][ind], dtype=np.float32)
+        if voxel_row.shape[0] != self.valid_voxel_mask.shape[0]:
+            raise RuntimeError(
+                f"Voxel row size mismatch for split={split}: "
+                f"row has {voxel_row.shape[0]} voxels, "
+                f"mask expects {self.valid_voxel_mask.shape[0]}."
+            )
+        return voxel_row[self.valid_voxel_mask]
+
     def _collect_fmri_targets(self, split: str, ind: int, available_subjects: List[int]):
         fmri_data = {}
         value_key = "parcel" if self.readout_res == "parcels" else "voxel"
 
         available_arrays = []
+        observed_values = {}
         for subj in available_subjects:
-            value = self.fmri[subj][split][value_key][ind]
+            if self.readout_res == "parcels":
+                value = self.fmri[subj][split][value_key][ind]
+                value = np.asarray(value, dtype=np.float32)
+            else:
+                value = self._get_voxel_row(subj, split, ind)
             if value is not None:
-                available_arrays.append(np.asarray(value, dtype=np.float32))
+                observed_values[subj] = value
+                available_arrays.append(value)
 
         if len(available_arrays) == 0:
             raise RuntimeError(f"No available targets for split={split}, ind={ind}")
@@ -483,9 +568,8 @@ class algonauts_dataset(Dataset):
         fill_value = np.mean(available_arrays, axis=0).astype(np.float32)
 
         for subj in self.subject_ids:
-            if subj in available_subjects:
-                value = self.fmri[subj][split][value_key][ind]
-                fmri_data[f"sub_{subj}"] = np.asarray(value, dtype=np.float32)
+            if subj in observed_values:
+                fmri_data[f"sub_{subj}"] = observed_values[subj]
             else:
                 if self.missing_target_policy == "strict":
                     raise RuntimeError(
@@ -499,10 +583,16 @@ class algonauts_dataset(Dataset):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_stim_handles"] = {}
+        state["_voxel_handles"] = {}
         return state
 
     def __del__(self):
         for handle in self._stim_handles.values():
+            try:
+                handle.close()
+            except Exception:
+                pass
+        for handle in self._voxel_handles.values():
             try:
                 handle.close()
             except Exception:

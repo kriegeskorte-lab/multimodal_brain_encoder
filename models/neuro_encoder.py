@@ -46,7 +46,6 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.video_proj = nn.LazyLinear(self.d_model)
             self.video_layernorm = nn.LayerNorm(self.d_model)
-            self.video_model.model.eval()
             
         if "audio" in self.modality:
             self.audio_model = FeatureWrapper(
@@ -58,7 +57,6 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.audio_proj = nn.LazyLinear(self.d_model)
             self.audio_layernorm = nn.LayerNorm(self.d_model)
-            self.audio_model.model.eval()
             
         if "text" in self.modality: 
             self.text_model = FeatureWrapper(
@@ -70,7 +68,6 @@ class Sensor(nn.Module):
                 p.requires_grad = False
             self.text_proj = nn.LazyLinear(self.d_model)
             self.text_layernorm = nn.LayerNorm(self.d_model)
-            self.text_model.model.eval()
 
         # LayerNorm can help stabilize training in multimodal fusion.
         self.multimodal_projector = nn.ModuleDict()
@@ -80,6 +77,17 @@ class Sensor(nn.Module):
             self.multimodal_projector["audio"] = nn.Sequential(self.audio_proj, self.audio_layernorm)
         if "text" in self.modality:
             self.multimodal_projector["text"] = nn.Sequential(self.text_proj, self.text_layernorm)
+    
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep pretrained feature backbones in eval mode even when parent model is training.
+        if hasattr(self, "video_model"):
+            self.video_model.model.eval()
+        if hasattr(self, "audio_model"):
+            self.audio_model.model.eval()
+        if hasattr(self, "text_model"):
+            self.text_model.model.eval()
+        return self
 
     def _encode_video(self, samples: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         inputs = samples["video"]
@@ -88,19 +96,22 @@ class Sensor(nn.Module):
         infer_kwargs: Dict[str, Any] = {}
         infer_kwargs["batch_size"] = inputs["pixel_values"].shape[0]
         infer_kwargs["time_steps"] = inputs["pixel_values"].shape[1]
-        video_feat = self.video_model.extract_features(inputs, **infer_kwargs)  # [B, C]
+        with torch.inference_mode():
+            video_feat = self.video_model.extract_features(inputs, **infer_kwargs)  # [B, C]
         return self.multimodal_projector["video"](video_feat)
 
     def _encode_audio(self, samples: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         inputs = samples["audio"]
         inputs = to_device(inputs, device)
-        audio_feat = self.audio_model.extract_features(inputs)  # [B, C]
+        with torch.inference_mode():
+            audio_feat = self.audio_model.extract_features(inputs)  # [B, C]
         return self.multimodal_projector["audio"](audio_feat)
 
     def _encode_text(self, samples: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         inputs = samples["text"]
         inputs = to_device(inputs, device)
-        text_feat = self.text_model.extract_features(inputs)  # [B, C]
+        with torch.inference_mode():
+            text_feat = self.text_model.extract_features(inputs)  # [B, C]
         return self.multimodal_projector["text"](text_feat)
 
     def forward(self, samples: NestedTensor) -> torch.Tensor:
@@ -137,11 +148,10 @@ class PerceptualAligner(nn.Module):
         self.modality_dropout_prob = float(getattr(args, "modality_dropout", 0.2))
         self.query_embed = nn.Embedding(args.num_queries, self.d_model) # learned positional embedding for query slots.
         self._build_pos_embedding()
-        self.pos_embed = None  
 
     def _build_pos_embedding(self):
         self.model2sequence_length = {
-            "wav2vec2": 1539,
+            "wav2vec": 1539,
             "whisper": 1500,
             "deberta": 512,
             "llama": 512,
@@ -299,20 +309,29 @@ class PerceptualAligner(nn.Module):
         text_x  = x.get("text", None)
 
         # add positional encodings per modality
+        pos_embed = []
         if video_x is not None:
-            pos = self.get_video_pos_encoding()  # [S, D] or [F, S, D] depending on backbone
-            video_x = video_x + pos.unsqueeze(0)
+            video_pos = self.get_video_pos_encoding()  # [S, D] or [F, S, D] depending on backbone
+            # video_x = video_x + video_pos.unsqueeze(0)
             if video_x.ndim == 4:
                 Bv, F, S, Dv = video_x.shape
                 video_x = video_x.reshape(Bv, F * S, Dv)
+            if video_pos.ndim == 3:
+                F, S, D = video_pos.shape
+                video_pos = video_pos.reshape(F * S, D)
+            pos_embed.append(video_pos)
 
         if audio_x is not None:
             audio_pos = self.audio_pos_embedding.weight  # [Ta, D]
-            audio_x = audio_x + audio_pos.unsqueeze(0)
+            # audio_x = audio_x + audio_pos.unsqueeze(0)
+            pos_embed.append(audio_pos)
 
         if text_x is not None:
             text_pos = self.text_pos_embedding.weight    # [Tt, D]
-            text_x = text_x + text_pos.unsqueeze(0)
+            # text_x = text_x + text_pos.unsqueeze(0)
+            pos_embed.append(text_pos)
+
+        pos_embed = torch.cat(pos_embed, dim=0)  # [Tv+Ta+Tt, D]
 
         # modality dropout after positional encodings (per sample, whole modality)
         video_x, audio_x, text_x, keep_map = self.modality_dropout(
@@ -355,6 +374,11 @@ class PerceptualAligner(nn.Module):
         # Adapt [B, T, D] to DETR-like interface expected by existing transformer.
         src = x_cat.transpose(1, 2).unsqueeze(-1)  # [B, D, T, 1] content
 
+        # [T, D] -> [1, D, T] -> [1, D, T, 1] 
+        pos_embed = pos_embed.unsqueeze(0).transpose(1, 2).unsqueeze(-1) # .repeat(B, 1, 1, 1)  # [B, D, T, 1]
+        # src = src + pos_embed  # this makes K/V have positional info, while queries remain purely learnable;
+        # pos_embed = None
+
         # attention padding mask
         src_mask = torch.cat(src_masks, dim=1).to(device=x_cat.device, dtype=torch.bool)  # [B, T]
 
@@ -365,7 +389,7 @@ class PerceptualAligner(nn.Module):
             src=src,
             mask=src_mask, 
             query_embed=query_embed,
-            pos_embed=None, # pos_embed is added to src tokens above;
+            pos_embed=pos_embed, # pos_embed is added to src tokens above;
             masks=False # feature-fusion flag (boolean)
         )
 
@@ -380,16 +404,65 @@ class Readout(nn.Module):
     def __init__(self, args, d_model: int, fmri_out_dim: int):
         super().__init__()
         self.fmri_out_dim = fmri_out_dim
-        # Shared projection applied independently to each query token: D -> 1.
         self.readout_fmri = args.readout_res
-        self.readout_head = nn.Linear(d_model, 1) # we need to change this if we want to predict voxels
+
+        if self.readout_fmri == 'parcels':
+            assert args.num_queries == args.num_parcels, \
+                "parcels readout requires num_queries == num_parcels"
+            self.output_dim = args.num_parcels
+            self.readout_head = nn.Linear(d_model, self.output_dim)
+
+        elif self.readout_fmri == 'voxels':
+            masked_parcellation = args.masked_parcellation # (172218,) 0 - 1000
+            valid_voxel_mask = args.valid_voxel_mask # (172218,) Bool
+
+            if len(masked_parcellation) != len(valid_voxel_mask):
+                raise ValueError(
+                    "masked_parcellation and valid_voxel_mask must have the same length."
+                )
+            
+            valid_masked_parcellation = masked_parcellation[valid_voxel_mask] # (122721,) 
+            valid_labels = torch.as_tensor(valid_masked_parcellation, dtype=torch.long) # torch.Size([122721])
+            voxel_to_query = valid_labels - 1  # 1..Q -> 0..Q-1
+
+            self.output_dim = int(valid_labels.numel())
+            if self.output_dim != args.num_voxels:
+                raise ValueError(
+                    f"Output dim mismatch: {self.output_dim} valid voxels but num_voxels={args.num_voxels}"
+                )
+
+            self.register_buffer("voxel_to_query", voxel_to_query) # torch.Size([122721])
+            self.readout_head = nn.Linear(d_model, self.output_dim)
+
+        else:
+            raise ValueError(f"Unsupported readout_res: {self.readout_fmri}")
 
     def forward(self, aligned_tokens: torch.Tensor):
         if self.readout_fmri == 'parcels':
-            assert aligned_tokens.shape[1] == self.fmri_out_dim, f"Expected number of query tokens {aligned_tokens.shape[1]} to match fmri_out_dim {self.fmri_out_dim} for parcel readout."
+            # aligned_tokens: [B, Q, D], with Q expected to match fmri_out_dim.
+
+            # Efficient equivalent of taking the diagonal after Linear(D -> Q):
+            # fmri_pred[b, q] = dot(aligned_tokens[b, q, :], W[q, :]) + b[q]
+            weight = self.readout_head.weight  # (Q, D)
+            bias = self.readout_head.bias  # (Q, )
+            if aligned_tokens.shape[1] != weight.shape[0]:
+                raise ValueError(
+                    f"Readout mismatch: num_queries={aligned_tokens.shape[1]} "
+                    f"but out_features={weight.shape[0]}"
+                )
+            fmri_pred = (aligned_tokens * weight.unsqueeze(0)).sum(dim=-1)
+            if bias is not None:
+                fmri_pred = fmri_pred + bias.unsqueeze(0)
         
-        # aligned_tokens: [B, Q, D], with Q expected to match fmri_out_dim.
-        fmri_pred = self.readout_head(aligned_tokens).squeeze(-1)  # [B, Q]
+        elif self.readout_fmri == 'voxels':
+            # For every voxel, pick the query token assigned to that voxel.
+            x_sel = aligned_tokens[:, self.voxel_to_query, :]   # [B, V, D] [B, 122721, D]
+            weight = self.readout_head.weight                   # [V, D]
+            bias = self.readout_head.bias                       # [V]
+
+            fmri_pred = (x_sel * weight.unsqueeze(0)).sum(dim=-1)
+            if bias is not None:
+                fmri_pred = fmri_pred + bias.unsqueeze(0)
         
         # l2_reg = torch.tensor(0.0, device=fmri_pred.device)
         # for p in self.readout_head.parameters():
@@ -447,6 +520,11 @@ if __name__ == "__main__":
     args.audio_backbone = "whisper"
     print(f"video_backbone: {args.video_backbone}, text_backbone: {args.text_backbone}, audio_backbone: {args.audio_backbone}")
     test_dataset = algonauts_dataset(args, include_splits=args.test_splits)
+
+    args.readout_res = "voxels"
+    args.valid_voxel_mask = test_dataset.valid_voxel_mask if args.readout_res == "voxels" else None
+    args.masked_parcellation = test_dataset.masked_parcellation if args.readout_res == "voxels" else None
+
     common = {
 		"batch_size": 2,
 		"num_workers": 2,
@@ -489,7 +567,8 @@ if __name__ == "__main__":
     print(f"fMRI prediction: {fmri_pred.shape} (expected [B, Q])")
 
     assert aligned.shape == (B, args.num_queries, D), "PerceptualAligner output shape mismatch"
-    assert fmri_pred.shape == (B, args.num_queries), "Readout output shape mismatch"
+    expected_dim = args.num_voxels if args.readout_res == "voxels" else args.num_queries
+    assert fmri_pred.shape == (B, expected_dim), "Readout output shape mismatch"
 
     # Train pass (dropout active)
     aligner.train()

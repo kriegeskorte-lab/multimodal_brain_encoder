@@ -63,9 +63,9 @@ class Transformer(nn.Module):
     def forward(self, src, mask, query_embed, pos_embed, masks, src_all=None):
         # flatten NxCxHxW to HWxNxC
         bs = src.shape[0]
-        src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = None if pos_embed is None else pos_embed.flatten(2).permute(2, 0, 1)
-        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        src = src.flatten(2).permute(2, 0, 1) # [T, B, D]
+        pos_embed = None if pos_embed is None else pos_embed.flatten(2).permute(2, 0, 1) # [T, B, D]
+        query_embed = query_embed.unsqueeze(1).expand(-1, bs, -1) # .repeat(1, bs, 1) # [num_queries, B, D]
         mask = mask.flatten(1)
 
         # print('src.shape:', src.shape)

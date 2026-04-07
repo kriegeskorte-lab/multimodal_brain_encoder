@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
+import args
 import torch
 import numpy as np
 
@@ -51,6 +52,11 @@ def build_dataloaders(args) -> Dict[str, DataLoader]:
 	train_dataset = algonauts_dataset(args, include_splits=args.train_splits)
 	val_dataset = algonauts_dataset(args, include_splits=args.val_splits)
 	test_dataset = algonauts_dataset(args, include_splits=args.test_splits)
+	
+	# set parcellation/masked_parcellation attributes on args for use in model initialization
+	args.valid_voxel_mask = test_dataset.valid_voxel_mask if args.readout_res == "voxels" else None
+	args.masked_parcellation = test_dataset.masked_parcellation if args.readout_res == "voxels" else None
+	
 
 	if args.pipeline_sanity_check:
 		train_dataset = _subset_for_sanity(train_dataset, args.sanity_batches, args.batch_size)
@@ -93,9 +99,10 @@ def main() -> None:
 		args.save_checkpoints = False
 		args.save_test_predictions = False
 
+	output_dir = None
 	if args.resume is not None:
 		output_dir = Path(args.resume).parent
-	else:
+	elif not args.pipeline_sanity_check:
 		time_tag = datetime.now().strftime("%m-%d-%Y-%H-%M")
 		output_dir = Path(args.ckpt_root) / str(args.subj) / time_tag
 		output_dir.mkdir(parents=True, exist_ok=True)
@@ -130,7 +137,7 @@ def main() -> None:
 		model.eval()
 		_ = model(dry_samples)
 		model.train()
-
+	
 	criterion = MSECriterion()
 	optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 	scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.step_size_gamma)
@@ -158,7 +165,7 @@ def main() -> None:
 	)
 
 	max_batches = args.sanity_batches if args.pipeline_sanity_check else None
-	best_ckpt_path = output_dir / "best.pt"
+	best_ckpt_path = output_dir / "best.pt" if output_dir else None
 
 	if not args.eval_only:
 		for epoch in range(start_epoch, args.epochs):
@@ -220,7 +227,7 @@ def main() -> None:
 
 		accelerator.wait_for_everyone()
 
-	if args.save_checkpoints and best_ckpt_path.exists():
+	if args.save_checkpoints and best_ckpt_path is not None and best_ckpt_path.exists():
 		accelerator.print(f"Loading best checkpoint from {best_ckpt_path}")
 		best_ckpt = torch.load(best_ckpt_path, map_location="cpu")
 		accelerator.unwrap_model(model).load_state_dict(best_ckpt["model"], strict=False)
@@ -245,12 +252,17 @@ def main() -> None:
 		f"==================================\nTest  : loss={test_loss_str} | acc={test_acc_str}"
 	)
 
-	if args.save_test_predictions and accelerator.is_main_process and test_stats.get("preds") is not None:
+	if (
+		args.save_test_predictions
+		and output_dir is not None
+		and accelerator.is_main_process
+		and test_stats.get("preds") is not None
+	):
 		pred_path = output_dir / "pred_test.npy"
 		with pred_path.open("wb") as f:
 			np.save(f, test_stats["preds"])
 
-	if accelerator.is_main_process:
+	if accelerator.is_main_process and output_dir is not None:
 		summary = {
 			"best_val_acc": best_val_acc,
 			"test_loss": float(test_loss) if test_loss is not None else None,

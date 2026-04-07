@@ -38,6 +38,8 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--readout_res", choices=["parcels", "voxels"], default="parcels", type=str)
 	parser.add_argument("--num_queries", default=1000, type=int)
 	parser.add_argument("--num_frames", default=16, type=int)
+	parser.add_argument("--num_parcels", default=1000, type=int)
+	parser.add_argument("--num_voxels", default=122721, type=int)
 
 	parser.add_argument("--modality", nargs="+", default=["video", "audio", "text"])
 	parser.add_argument("--video_backbone", default="metaclip", type=str)

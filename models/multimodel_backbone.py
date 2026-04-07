@@ -7,6 +7,7 @@ import torch
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
+    AutoFeatureExtractor,
     AutoModel,
     AutoProcessor,
     AutoTokenizer,
@@ -15,6 +16,7 @@ from transformers import (
     TimesformerModel,
     VideoMAEImageProcessor,
     Wav2Vec2Model,
+    Wav2Vec2BertModel,
     Wav2Vec2Processor,
     WhisperModel,
     WhisperProcessor,
@@ -24,19 +26,30 @@ from transformers import (
 BACKBONE_LIST = {
     "text": {
         "llama": "meta-llama/Llama-3.2-1B",
-        "deberta": "microsoft/deberta-v3-large",
-        "metaclip": "facebook/metaclip-2-worldwide-m16",
+        "deberta": "microsoft/deberta-v3-base",
+        # "metaclip": "facebook/metaclip-2-worldwide-m16",
+        "metaclip": "facebook/metaclip-2-worldwide-l14",
     },
     "video": {
         "timesformer": "facebook/timesformer-base-finetuned-k400",
         "videomae": "OpenGVLab/VideoMAEv2-Base",
         "dino": "facebook/dinov3-vitb16-pretrain-lvd1689m",
-        "metaclip": "facebook/metaclip-2-worldwide-m16",
+        # "metaclip": "facebook/metaclip-2-worldwide-m16", 
+        "metaclip": "facebook/metaclip-2-worldwide-b16",
+        # "eupe": "facebook/EUPE-ViT-B",
     },
     "audio": {
-        "wav2vec2": "facebook/wav2vec2-base-960h",
+        # "wav2vec": "facebook/wav2vec2-base-960h",
+        "wav2vec": "facebook/w2v-bert-2.0",
         "whisper": "openai/whisper-small",
     },
+}
+
+video2frames_defaults = {
+    "dino": 16,
+    "metaclip": 16,
+    "videomae": 16,
+    "timesformer": 16,
 }
 
 
@@ -98,12 +111,17 @@ class ProcessorWrapper:
                     cache_dir=self.cache_dir,
                     use_fast=True,
                 )
-            if self.backbone == "wav2vec2":
-                return Wav2Vec2Processor.from_pretrained(
+            if self.backbone == "wav2vec":
+                return AutoFeatureExtractor.from_pretrained(
                     self.model_name,
                     cache_dir=self.cache_dir,
                     use_fast=True,
                 )
+                # return Wav2Vec2Processor.from_pretrained(
+                #     self.model_name,
+                #     cache_dir=self.cache_dir,
+                #     use_fast=True,
+                # )
 
         if self.modality == "video":
             if self.backbone == "metaclip":
@@ -206,12 +224,17 @@ class FeatureWrapper(torch.nn.Module):
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
                 )
-            if self.backbone == "wav2vec2":
-                return Wav2Vec2Model.from_pretrained(
+            if self.backbone == "wav2vec":
+                return Wav2Vec2BertModel.from_pretrained(
                     self.model_name,
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
                 )
+                # return Wav2Vec2Model.from_pretrained(
+                #     self.model_name,
+                #     use_safetensors=True,
+                #     cache_dir=self.cache_dir,
+                # )
 
         if self.modality == "video":
             if self.backbone == "metaclip":
@@ -294,6 +317,7 @@ class FeatureWrapper(torch.nn.Module):
                 outputs = self.model.encoder(**inputs)
         else:
             with torch.no_grad():
+                # print(inputs.keys())
                 outputs = self.model(**inputs)
 
         if self.modality == "text":
@@ -454,23 +478,24 @@ if __name__ == "__main__":
 
     # Toggle these for quick checks.
     tests = [
-        ("text", "deberta"),
-        ("text", "llama"),
+        # ("text", "deberta"),
+        # ("text", "llama"),
         ("text", "metaclip"),
-        ("audio", "wav2vec2"),
-        ("audio", "whisper"),
-        ("video", "videomae"),
-        ("video", "timesformer"),
-        ("video", "dino"),
+        # ("audio", "wav2vec"),
+        # ("audio", "whisper"),
+        # ("video", "videomae"),
+        # ("video", "timesformer"),
+        # ("video", "dino"),
         ("video", "metaclip"),
     ]
 
     for modality_name, backbone_name in tests:
-        try:
-            run_test(modality_name, backbone_name)
-        except Exception as exc:
-            print(f"Failed {modality_name}/{backbone_name}: {exc}")
-            print("=" * 50)
+        run_test(modality_name, backbone_name)
+        # try:
+        #     run_test(modality_name, backbone_name)
+        # except Exception as exc:
+        #     print(f"Failed {modality_name}/{backbone_name}: {exc}")
+        #     print("=" * 50)
 
 
 '''
@@ -486,9 +511,9 @@ Testing text/metaclip with model: facebook/metaclip-2-worldwide-m16
 Input keys: ['input_ids', 'attention_mask']                                   
 Feature shape: torch.Size([2, 77, 512])                                       
 ==================================================                            
-Testing audio/wav2vec2 with model: facebook/wav2vec2-base-960h                
-Input keys: ['input_values']                                                  
-Feature shape: torch.Size([2, 1539, 768])                                     
+Testing audio/wav2vec with model: facebook/w2v-bert-2.0               
+Input keys: ['input_features', 'attention_mask']                                                 
+Feature shape: torch.Size([2, 1539, 1024])                                    
 ==================================================                            
 Testing audio/whisper with model: openai/whisper-small                        
 Input keys: ['input_features']                                                
@@ -502,8 +527,8 @@ Testing video/timesformer with model: facebook/timesformer-base-finetuned-k400
 Input keys: ['pixel_values']                                                  
 Feature shape: torch.Size([2, 3137, 768]) # 3137 = 16 frames * 14 * 14 + 1 (cls token)                               
 ==================================================                            
-Testing video/dino with model: facebook/dinov3-vitb16-pretrain-lvd1689m       
-Input keys: ['pixel_values']                                                  
+Testing video/dino with model: facebook/dinov3-vitb16-pretrain-lvd1689m 
+Input keys: ['pixel_values']              
 Feature shape: torch.Size([2, 16, 201, 768])  # 201 = 14 * 14 + 1 (cls token) + 4 (registers)                               
 ==================================================                            
 Testing video/metaclip with model: facebook/metaclip-2-worldwide-m16          

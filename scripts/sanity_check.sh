@@ -21,9 +21,9 @@ NHEADS=8
 NUM_QUERIES=1000
 
 MODALITY=(video audio text)
-VIDEO_BACKBONE="dino"
-AUDIO_BACKBONE="wav2vec2"
-TEXT_BACKBONE="deberta"
+VIDEO_BACKBONE="metaclip"
+AUDIO_BACKBONE="whisper"
+TEXT_BACKBONE="metaclip"
 
 # bash scripts/sanity_check.sh
 pixi run accelerate launch \

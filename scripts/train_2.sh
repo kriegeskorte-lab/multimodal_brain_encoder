@@ -11,17 +11,20 @@ EPOCHS=10
 BATCH_SIZE=28
 NUM_WORKERS=4
 LR=1e-4
-STEP_SIZE=20
-STEP_SIZE_GAMMA=1.0 # do not change for now
-WEIGHT_DECAY=1e-4
+STEP_SIZE=4
+STEP_SIZE_GAMMA=0.5 # do not change for now
+WEIGHT_DECAY=1e-3
 TRAIN_SPLITS="friends-train-default"
 VAL_SPLITS="friends-test-default"
 TEST_SPLITS="movie10-ood-default"
 
 MODALITY=(video audio text)
-VIDEO_BACKBONE="dino"
+VIDEO_BACKBONE="metaclip"
 AUDIO_BACKBONE="whisper"
-TEXT_BACKBONE="llama"
+TEXT_BACKBONE="metaclip"
+# VIDEO_BACKBONE="dino"
+# AUDIO_BACKBONE="whisper"
+# TEXT_BACKBONE="llama"
 MODALITY_DROPOUT=0.3
 
 HIDDEN_DIM=768
