@@ -96,21 +96,21 @@ class Sensor(nn.Module):
         infer_kwargs: Dict[str, Any] = {}
         infer_kwargs["batch_size"] = inputs["pixel_values"].shape[0]
         infer_kwargs["time_steps"] = inputs["pixel_values"].shape[1]
-        with torch.inference_mode():
+        with torch.no_grad():
             video_feat = self.video_model.extract_features(inputs, **infer_kwargs)  # [B, C]
         return self.multimodal_projector["video"](video_feat)
 
     def _encode_audio(self, samples: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         inputs = samples["audio"]
         inputs = to_device(inputs, device)
-        with torch.inference_mode():
+        with torch.no_grad():
             audio_feat = self.audio_model.extract_features(inputs)  # [B, C]
         return self.multimodal_projector["audio"](audio_feat)
 
     def _encode_text(self, samples: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         inputs = samples["text"]
         inputs = to_device(inputs, device)
-        with torch.inference_mode():
+        with torch.no_grad():
             text_feat = self.text_model.extract_features(inputs)  # [B, C]
         return self.multimodal_projector["text"](text_feat)
 
@@ -160,6 +160,8 @@ class PerceptualAligner(nn.Module):
             "timesformer": 3137,
             "videomae": 1568,
             "dino": 201,
+            "openaiclipvision": 257,
+            "openaicliptext": 77,
         }
         if "audio" in self.modality:
             self.audio_backbone = self.args.audio_backbone.lower()
@@ -169,31 +171,42 @@ class PerceptualAligner(nn.Module):
             self.text_backbone = self.args.text_backbone.lower()
             if self.text_backbone == 'metaclip':
                 num_text_tokens = self.model2sequence_length["metacliptext"]
+            elif self.text_backbone == 'openaiclip':
+                num_text_tokens = self.model2sequence_length["openaicliptext"]
             else:
                 num_text_tokens = self.model2sequence_length[self.text_backbone]
             self.text_pos_embedding = nn.Embedding(num_text_tokens, self.d_model)
         if "video" in self.modality:
             self.video_backbone = self.args.video_backbone.lower()
             # Current models all use 14x14 = 196 patch tokens per temporal step/frame.
-            self.video_num_spatial = 196
 
             if self.video_backbone == "videomae":
                 # 16 frames with tubelet_size=2 -> 8 temporal tokens
+                self.video_num_spatial = 196
                 self.video_num_temporal = 8
                 self.video_num_special = 0
 
             elif self.video_backbone == "timesformer":
                 # 16 frames, flattened later; 1 CLS token total
+                self.video_num_spatial = 196
                 self.video_num_temporal = 16
                 self.video_num_special = 1
 
             elif self.video_backbone == "dino":
                 # 16 frames, per frame: 1 CLS + 4 register + 196 patch tokens
+                self.video_num_spatial = 196
                 self.video_num_temporal = 16
                 self.video_num_special = 5
 
             elif self.video_backbone == "metaclip":
                 # 16 frames, per frame: 1 CLS + 196 patch tokens
+                self.video_num_spatial = 196
+                self.video_num_temporal = 16
+                self.video_num_special = 1
+
+            elif self.video_backbone == "openaiclip":
+                # 16 frames, per frame: 1 CLS + 256 patch tokens
+                self.video_num_spatial = 256
                 self.video_num_temporal = 16
                 self.video_num_special = 1
             else:
@@ -218,11 +231,13 @@ class PerceptualAligner(nn.Module):
             timesformer:[B, 3137, D]        = [B, 1 + 16 * 196, D]
             dino:       [B, 16, 201, D]     = [B, 16, 5 + 196, D]
             metaclip:   [B, 16, 197, D]     = [B, 16, 1 + 196, D]
+            openaiclip: [B, 16, 257, D]     = [B, 16, 1 + 256, D]
         Outputs: 
             pos_embed:  [1568, D]        = [8 * 196, D]
             pos_embed:  [3137, D]        = [1 + 16 * 196, D]
             pos_embed:  [16, 201, D]     = [16, 5 + 196, D]
             pos_embed:  [16, 197, D]     = [16, 1 + 196, D]
+            pos_embed:  [16, 257, D]     = [16, 1 + 256, D]
         """
         def build() -> torch.Tensor:
 
@@ -252,6 +267,13 @@ class PerceptualAligner(nn.Module):
                 spatial = self.video_spatial_embed.weight  # [196, D]
                 frame = torch.cat([special, spatial], dim=0)  # [197, D]
                 return frame.unsqueeze(0) + temp  # [16, 197, D]
+            
+            if self.video_backbone == "openaiclip":
+                temp = self.video_temporal_embed.weight[:, None, :]  # [T,1,D]
+                special = self.video_special_embed.weight  # [1, D]
+                spatial = self.video_spatial_embed.weight  # [256, D]
+                frame = torch.cat([special, spatial], dim=0)  # [257, D]
+                return frame.unsqueeze(0) + temp  # [16, 257, D]
 
             raise ValueError(f"Unsupported video backbone: {self.video_backbone}")
 
@@ -385,7 +407,7 @@ class PerceptualAligner(nn.Module):
         # learnable query embeddings, expected shape [num_queries, D]
         query_embed = self.query_embed.weight    # [num_queries, D]
 
-        hidden_states = self.transformer(
+        hidden_states, attn_maps = self.transformer(
             src=src,
             mask=src_mask, 
             query_embed=query_embed,
@@ -395,7 +417,7 @@ class PerceptualAligner(nn.Module):
 
         # Expected [L, B, Q, D] if return_intermediate_dec=True.
         outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
-        return self.output_norm(outputs)
+        return self.output_norm(outputs), attn_maps
     
 
 class Readout(nn.Module):
@@ -425,11 +447,7 @@ class Readout(nn.Module):
             valid_labels = torch.as_tensor(valid_masked_parcellation, dtype=torch.long) # torch.Size([122721])
             voxel_to_query = valid_labels - 1  # 1..Q -> 0..Q-1
 
-            self.output_dim = int(valid_labels.numel())
-            if self.output_dim != args.num_voxels:
-                raise ValueError(
-                    f"Output dim mismatch: {self.output_dim} valid voxels but num_voxels={args.num_voxels}"
-                )
+            self.output_dim = int(valid_labels.numel()) # 1: 122721; 2: 119282
 
             self.register_buffer("voxel_to_query", voxel_to_query) # torch.Size([122721])
             self.readout_head = nn.Linear(d_model, self.output_dim)
@@ -494,13 +512,14 @@ class NeuroEncoder(nn.Module):
 
     def forward(self, samples: NestedTensor):
         multimodal_tokens = self.sensor(samples)
-        multimodal_latents = self.perceptual_aligner(multimodal_tokens)
+        multimodal_latents, attn_maps = self.perceptual_aligner(multimodal_tokens)
         fmri_pred, l2_reg = self.readout(multimodal_latents)
 
         return {
             "fmri_pred": fmri_pred,
             "output_tokens": multimodal_latents,
             "l2_reg": l2_reg,
+            "attn_maps": attn_maps
         }
 
 
@@ -510,24 +529,28 @@ if __name__ == "__main__":
 
     parser = get_args_parser()
     args = parser.parse_args()
-    args.test_splits = ["life"]
+    args.test_splits = ["wolf"]
     args.backbone_list = BACKBONE_LIST
-    # args.text_backbone = random.choice(list(BACKBONE_LIST['text'].keys()))
-    # args.video_backbone = random.choice(list(BACKBONE_LIST['video'].keys()))
-    # args.audio_backbone = random.choice(list(BACKBONE_LIST['audio'].keys()))
-    args.text_backbone = "llama"
-    args.video_backbone = "dino"
-    args.audio_backbone = "whisper"
+    args.text_backbone = random.choice(list(BACKBONE_LIST['text'].keys()))
+    args.video_backbone = random.choice(list(BACKBONE_LIST['video'].keys()))
+    args.audio_backbone = random.choice(list(BACKBONE_LIST['audio'].keys()))
+    # args.text_backbone = "openaiclip"
+    # args.video_backbone = "openaiclip"
+    # args.audio_backbone = "whisper"
+    # args.text_backbone = "metaclip"
+    # args.video_backbone = "metaclip"
+    # args.audio_backbone = "whisper"
     print(f"video_backbone: {args.video_backbone}, text_backbone: {args.text_backbone}, audio_backbone: {args.audio_backbone}")
     test_dataset = algonauts_dataset(args, include_splits=args.test_splits)
 
-    args.readout_res = "voxels"
-    args.valid_voxel_mask = test_dataset.valid_voxel_mask if args.readout_res == "voxels" else None
-    args.masked_parcellation = test_dataset.masked_parcellation if args.readout_res == "voxels" else None
+    # args.readout_res = "voxels"
+    # args.valid_voxel_mask = test_dataset.valid_voxel_mask if args.readout_res == "voxels" else None
+    # args.masked_parcellation = test_dataset.masked_parcellation if args.readout_res == "voxels" else None
 
+    B, D = 16, args.hidden_dim
     common = {
-		"batch_size": 2,
-		"num_workers": 2,
+		"batch_size": B,
+		"num_workers": 0,
 		"pin_memory": True,
 		# "persistent_workers": args.num_workers > 0,
 		"persistent_workers": False,
@@ -537,11 +560,13 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset, shuffle=False, drop_last=False, **common)
 
     sensor = Sensor(args).to(device)
+    sensor.eval()  
     for samples, targets in test_loader:
-        print(samples.keys())
+        # print(samples.keys())
         multimodal_tokens = sensor(samples)
         for modality, tokens in multimodal_tokens.items():
-            print(f"{modality} tokens shape: {tokens.shape}")
+            # print(f"{modality} tokens shape: {tokens.shape}")
+            pass
         break  # just one batch for a quick check
     '''
     video tokens shape: torch.Size([2, 16, 197, 256]) 
@@ -549,7 +574,6 @@ if __name__ == "__main__":
     text tokens shape: torch.Size([2, 77, 256])
     '''
 
-    B, D = 2, args.hidden_dim
     # x = torch.randn(B, T, D, device=device)
     x = multimodal_tokens
 
@@ -558,8 +582,9 @@ if __name__ == "__main__":
 
     # Eval pass (deterministic shape check)
     aligner.eval()
+    readout.eval()
     with torch.no_grad():
-        aligned = aligner(x)
+        aligned, _ = aligner(x)
         fmri_pred, _ = readout(aligned)
 
     print("=== Shape check (eval) ===")
@@ -572,7 +597,8 @@ if __name__ == "__main__":
 
     # Train pass (dropout active)
     aligner.train()
-    aligned_train = aligner(x)
+    readout.train()
+    aligned_train, _ = aligner(x)
     fmri_pred_train, _ = readout(aligned_train)
 
     print("=== Shape check (train; modality dropout active) ===")

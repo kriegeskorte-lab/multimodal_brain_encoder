@@ -19,7 +19,7 @@ ddp_kwargs = DistributedDataParallelKwargs(
 
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
 from eval import evaluate
@@ -69,7 +69,7 @@ def build_dataloaders(args) -> Dict[str, DataLoader]:
 		"pin_memory": True,
 		# "persistent_workers": args.num_workers > 0,
 		"persistent_workers": False,
-		"prefetch_factor": None if args.num_workers <= 1 else 2,  # default is 2, 
+		"prefetch_factor": None if args.num_workers == 0 else 1,  # default is 2, 
 	}
 
 	train_loader = DataLoader(train_dataset, shuffle=True, drop_last=True, **common)
@@ -118,6 +118,11 @@ def main() -> None:
 	set_seed(args.seed)
 	accelerator.print(f"Using mixed precision: {accelerator.mixed_precision}")
 
+	accelerator.print("Arguments:")
+	for k, v in vars(args).items():
+		if k in ["subj", "batch_size", "lr", "readout_res", "step_size", "step_size_gamma", "modality_dropout", "modality", "video_backbone", "audio_backbone", "text_backbone"]:
+			accelerator.print(f"  {k}: {v}")
+
 	if args.use_wandb:
 		accelerator.init_trackers(
 			project_name=args.wandb_project,
@@ -140,7 +145,8 @@ def main() -> None:
 	
 	criterion = MSECriterion()
 	optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-	scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.step_size_gamma)
+	# scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.step_size_gamma)
+	scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)  # alternative scheduler
 
 	start_epoch = 0
 	best_val_acc = float("-inf")
@@ -155,13 +161,12 @@ def main() -> None:
 		start_epoch = int(ckpt.get("epoch", -1)) + 1
 		best_val_acc = float(ckpt.get("best_val_acc", best_val_acc))
 
-	model, optimizer, dataloaders["train"], dataloaders["val"], dataloaders["test"], scheduler = accelerator.prepare(
+	model, optimizer, dataloaders["train"], dataloaders["val"], dataloaders["test"] = accelerator.prepare(
 		model,
 		optimizer,
 		dataloaders["train"],
 		dataloaders["val"],
-		dataloaders["test"],
-		scheduler,
+		dataloaders["test"]
 	)
 
 	max_batches = args.sanity_batches if args.pipeline_sanity_check else None

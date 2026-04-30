@@ -20,7 +20,8 @@ class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_enc=False, return_intermediate_dec=False, enc_output_layer=-1):
+                 return_intermediate_enc=False, return_intermediate_dec=False, enc_output_layer=-1,
+                 return_attn_maps=False):
         super().__init__()
         
         self.num_encoder_layers = num_encoder_layers
@@ -37,11 +38,13 @@ class Transformer(nn.Module):
         self.num_decoder_layers = num_decoder_layers
         
         if self.num_decoder_layers > 0:
-            decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
-                                        dropout, activation, normalize_before)
+            decoder_layer = TransformerDecoderLayer(
+                d_model, nhead, dim_feedforward, dropout, activation, normalize_before, return_attn_maps=return_attn_maps)
             decoder_norm = nn.LayerNorm(d_model)
-            self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
-                                              return_intermediate=return_intermediate_dec)
+            self.decoder = TransformerDecoder(
+                decoder_layer, num_decoder_layers, decoder_norm,
+                return_attn_maps=return_attn_maps,
+                return_intermediate=return_intermediate_dec)
                                           
 #         self.decoder = TransformerEncoder(encoder_layer, num_decoder_layers, encoder_norm)
         
@@ -77,7 +80,7 @@ class Transformer(nn.Module):
         
         if self.num_encoder_layers > 0:
         
-            memory_layers, sattn = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+            memory_layers, attn_maps = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
 
             memory = memory_layers[self.enc_output_layer]
             
@@ -96,10 +99,10 @@ class Transformer(nn.Module):
 
 
         if self.num_decoder_layers > 0:
-            hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+            hs, attn_maps = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                               pos=pos_embed, query_pos=query_embed)
             
-            return hs.transpose(1, 2) 
+            return hs.transpose(1, 2), attn_maps
         
         return memory.permute(1, 2, 0).view(bs, c, h, w)
 
@@ -188,12 +191,13 @@ class TransformerEncoder(nn.Module):
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
+    def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False, return_attn_maps=False):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
         self.return_intermediate = return_intermediate
+        self.return_attn_maps = return_attn_maps
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
@@ -205,15 +209,17 @@ class TransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
-
+        attn_maps = []
         for layer in self.layers:
-            output = layer(output, memory, tgt_mask=tgt_mask,
+            output, attn_map = layer(output, memory, tgt_mask=tgt_mask,
                            memory_mask=memory_mask,
                            tgt_key_padding_mask=tgt_key_padding_mask,
                            memory_key_padding_mask=memory_key_padding_mask,
                            pos=pos, query_pos=query_pos)
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
+            if self.return_attn_maps:
+                attn_maps.append(attn_map) # attn_map: [batch, heads, num_queries, memory_tokens]
 
         if self.norm is not None:
             output = self.norm(output)
@@ -222,9 +228,9 @@ class TransformerDecoder(nn.Module):
                 intermediate.append(output)
 
         if self.return_intermediate:
-            return torch.stack(intermediate)
+            return torch.stack(intermediate), attn_maps
 
-        return output.unsqueeze(0)
+        return output.unsqueeze(0), attn_maps
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -292,7 +298,7 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerDecoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=True):
+                 activation="relu", normalize_before=True, return_attn_maps=False):
         super().__init__()
         # self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -311,6 +317,7 @@ class TransformerDecoderLayer(nn.Module):
 
         self.activation = _get_activation_fn(activation)
         self.normalize_before = normalize_before
+        self.return_attn_maps = return_attn_maps
 
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
@@ -330,7 +337,16 @@ class TransformerDecoderLayer(nn.Module):
         
         # cross attention
         tgt = self.norm1(tgt)
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
+        attn_map = None
+        if self.return_attn_maps:
+            tgt2, attn_map = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
+                                   key=self.with_pos_embed(memory, pos),
+                                   value=memory, attn_mask=memory_mask,
+                                   key_padding_mask=memory_key_padding_mask,
+                                   need_weights=True,
+                                   average_attn_weights=False)
+        else:
+            tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
                                    key=self.with_pos_embed(memory, pos),
                                    value=memory, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask)[0]
@@ -345,7 +361,7 @@ class TransformerDecoderLayer(nn.Module):
         #                       key_padding_mask=tgt_key_padding_mask)[0]
         # tgt = tgt + self.dropout1(tgt2)
 
-        return tgt
+        return tgt, attn_map
 
     # def forward_pre(self, tgt, memory,
     #                 tgt_mask: Optional[Tensor] = None,
@@ -395,7 +411,16 @@ class TransformerDecoderLayer(nn.Module):
         # tgt2 = self.norm2(tgt)
         
         # cross attention
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
+        attn_map = None
+        if self.return_attn_maps:
+            tgt2, attn_map = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
+                                   key=self.with_pos_embed(memory, pos),
+                                   value=memory, attn_mask=memory_mask,
+                                   key_padding_mask=memory_key_padding_mask,
+                                   need_weights=True,
+                                   average_attn_weights=False)
+        else:
+            tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
                                    key=self.with_pos_embed(memory, pos),
                                    value=memory, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask)[0]
@@ -404,7 +429,7 @@ class TransformerDecoderLayer(nn.Module):
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
         tgt = tgt + self.dropout3(tgt2)
 
-        return tgt
+        return tgt, attn_map
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
@@ -436,6 +461,7 @@ def build_transformer(args):
         return_intermediate_enc=True,
         return_intermediate_dec=True,
         enc_output_layer = args.enc_output_layer,
+        return_attn_maps=args.attn_maps
     )
 
 

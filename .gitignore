@@ -43,6 +43,7 @@ docs/
 legacy/
 ckpt/
 wandb/
+attn_maps/
 kernel.json
 AGENT.md
 

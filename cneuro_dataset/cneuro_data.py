@@ -55,6 +55,22 @@ movies_all = [
     "movie10-wolf",
 ]
 
+MOVIE10_OOD_NAMES = [
+    "chaplin1",
+    "chaplin2",
+    "mononoke1",
+    "mononoke2",
+    "passepartout1",
+    "passepartout2",
+    "planetearth1",
+    "planetearth2",
+    "pulpfiction1",
+    "pulpfiction2",
+    "wot1",
+    "wot2",
+]
+MOVIE10_OOD_SET = set(MOVIE10_OOD_NAMES)
+
 FRIENDS_SEASONS = ["s01", "s02", "s03", "s04", "s05", "s06"]
 MOVIE10_NAMES = ["bourne", "figures", "life", "wolf"]
 
@@ -69,6 +85,9 @@ SPLIT_GROUP_ALIASES = {
     "movie10-train-default": ["bourne", "figures", "life"],
     "movie10-test-default": ["wolf"],
     "friends-ood-default": FRIENDS_SEASONS,
+    "friends-challenge-default": ["s07"],
+    "movie10-challenge-default": MOVIE10_OOD_NAMES,
+    "movie10-attn-probing":["figures"]
 }
 
 
@@ -105,6 +124,22 @@ def _split_matches_token(split, token):
     if re.fullmatch(r"s\d{2}", token):
         return split.startswith(f"{token}e")
 
+    # explicit friends challenge selector
+    if token in {"s7", "s07"}:
+        return split.startswith("s07e")
+
+    # ood selectors
+    if token == "ood":
+        if split.startswith("ood_"):
+            return split[4:] in MOVIE10_OOD_SET # remove prefix
+        return split in MOVIE10_OOD_SET
+
+    if token.startswith("ood_"):
+        token = token[4:]
+
+    if token in MOVIE10_OOD_SET:
+        return split == token or split == f"ood_{token}"
+
     # movie-level selector (e.g., life)
     if token in MOVIE10_NAMES:
         return token in split
@@ -122,7 +157,45 @@ def _split_is_selected(split, include_tokens, exclude_tokens):
 
 
 def _movie_type_from_split_name(split: str) -> str:
-    return "friends" if re.match(r"^s\d\de\d\d[a-zA-Z]$", split) else "movie10"
+    split = split.lower()
+    if re.match(r"^s\d\de\d\d[a-zA-Z]$", split):
+        return "friends"
+    if split.startswith("ood_"):
+        return "ood"
+    if split in MOVIE10_OOD_SET:
+        return "ood"
+    return "movie10"
+
+
+def _expand_split_tokens(tokens: List[str]) -> List[str]:
+    """Expand alias tokens recursively into leaf tokens."""
+    expanded: List[str] = []
+    stack = list(tokens)
+    while stack:
+        token = stack.pop()
+        if token in SPLIT_GROUP_ALIASES:
+            stack.extend([str(t).lower() for t in SPLIT_GROUP_ALIASES[token]])
+        else:
+            expanded.append(token)
+    return expanded
+
+
+def _token_is_no_target_leaf(token: str) -> bool:
+    token = token.lower().strip()
+    if token in {"s7", "s07", "ood"}:
+        return True
+    if re.fullmatch(r"s07e\d\d[a-zA-Z]", token):
+        return True
+    if token.startswith("ood_"):
+        token = token[4:]
+    return token in MOVIE10_OOD_SET
+
+
+def _tokens_request_only_no_target(include_tokens: List[str]) -> bool:
+    if not include_tokens:
+        return False
+    leaves = _expand_split_tokens(include_tokens)
+    return len(leaves) > 0 and all(_token_is_no_target_leaf(tok) for tok in leaves)
 
 
 def load_fmri(root_data_dir, subject, readout_res, include_split=None, exclude_split=None):
@@ -255,26 +328,75 @@ def load_voxel_index(subject, include_split=None, exclude_split=None):
     return fmri
 
 
-def extract_text(text, text_range=None):
-    df = pd.DataFrame(list(text.items()), columns=["tr", "text_per_tr"])
-    ### Load the transcript ###
-    df.insert(loc=0, column="is_na", value=df["text_per_tr"].isna())
+# def extract_text(text, text_processor, text_range=None, silence_mode="boundary"):
+#     df = pd.DataFrame(list(text.items()), columns=["tr", "text_per_tr"])
+#     ### Load the transcript ###
+#     df.insert(loc=0, column="is_na", value=df["text_per_tr"].isna())
 
-    ### Initialize the features list ###
+#     ### Initialize the features list ###
+#     text_all = []
+
+#     for i in range(df.shape[0]):  # , desc="Extracting language features"):
+#         if text_range is not None:
+#             start, end = text_range
+#             if i < start or i > end:   # for clip model to narrow down the window
+#                 continue
+#         ### Tokenize raw text ###
+#         if not df.iloc[i]["is_na"]:  # Only tokenize if words were spoken during a chunk (i.e., if the chunk is not empty)
+#             # Tokenize raw text with puntuation (for pooler_output features)
+#             tr_text = df.iloc[i]["text_per_tr"]
+#         # else:
+#         #     tr_text = text_processor.processor.eos_token
+#             text_all.append(tr_text)
+
+#     # print(f"tokens: {len(tokens)}  np_tokens: {len(np_tokens)}")
+#     return text_all
+
+def set_silence_token(text_processor):
+    '''transcript without spoken words, prioritizing special tokens defined in the tokenizer.'''
+    tokenizer = getattr(text_processor, "processor", text_processor)
+    silence_token = getattr(tokenizer, "sep_token", None) or getattr(tokenizer, "eos_token", None)
+    return silence_token
+
+def extract_text(
+    text,
+    silence_token,
+    text_range=None,
+    silence_mode: str = "boundary",  # "skip" | "boundary" | "empty"
+):
+    items = list(text.items())
+
+    if text_range is not None:
+        start, end = text_range
+        items = items[start:end + 1]
+
     text_all = []
+    for _, tr_text in items:
+        is_silent = (tr_text is None) or (isinstance(tr_text, str) and tr_text.strip() == "")
 
-    for i in range(df.shape[0]):  # , desc="Extracting language features"):
-        if text_range is not None:
-            if (i<5) or (i>13):   # for clip model to narrow down the window
+        if is_silent:
+            if silence_mode == "skip":
                 continue
-        ### Tokenize raw text ###
-        if not df.iloc[i]["is_na"]:  # Only tokenize if words were spoken during a chunk (i.e., if the chunk is not empty)
-            # Tokenize raw text with puntuation (for pooler_output features)
-            tr_text = df.iloc[i]["text_per_tr"]
-            text_all.append(tr_text)
 
-    # print(f"tokens: {len(tokens)}  np_tokens: {len(np_tokens)}")
-    return text_all
+            elif silence_mode == "boundary":
+                if silence_token is not None:
+                    text_all.append(silence_token)
+                # if no token exists → effectively skip
+
+            elif silence_mode == "empty":
+                # preserve position but no semantic token
+                text_all.append("")
+
+            else:
+                raise ValueError(f"Unknown silence_mode: {silence_mode}")
+
+        else:
+            text_all.append(str(tr_text).strip())
+
+    if not text_all and silence_mode != "skip" and silence_token is not None:
+        text_all.append(silence_token)
+    # print(f"Extracted text: {text_all}")
+    return text_all 
 
 
 def extract_language_context(df_movie, ind):
@@ -282,7 +404,8 @@ def extract_language_context(df_movie, ind):
     start = max(ind - 20, 0)
     end = ind
     df = df_movie.iloc[start:end]["text_per_tr"]
-    context_dict = df.to_dict()
+    # context_dict = df.to_dict()
+    context_dict = {k: (None if pd.isna(v) else v) for k, v in df.items()}
 
     return context_dict
 
@@ -319,46 +442,52 @@ class algonauts_dataset(Dataset):
         self.fmri = {}
         self.voxel_h5_paths: Dict[int, Dict[str, Path]] = {}
 
+        self.stim_paths = {
+            "friends": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/friends_smaller.h5",
+            "movie10": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/movie10_smaller.h5",
+            "ood": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/ood_smaller.h5",
+        }
+
         self.backbone_list = args.backbone_list
 
-        # Subject selection:
-        #   args.subj == 0 -> load all available subjects (default behavior)
-        #   args.subj > 0  -> load only that subject
+        # Subject selection
         all_subject_ids = [1, 2, 3, 5]
-        if self.subj == 0:
-            self.subject_ids = all_subject_ids
-        else:
-            if self.subj not in all_subject_ids:
-                raise ValueError(
-                    f"Unsupported subject id: {self.subj}. Use 0 for all subjects or one of {all_subject_ids}."
-                )
-            self.subject_ids = [self.subj]
+        if self.subj not in all_subject_ids:
+            raise ValueError(
+                f"Unsupported subject id: {self.subj}. Use 0 for all subjects or one of {all_subject_ids}."
+            )
+        self.subject_ids = [self.subj]
 
         # Backward-compatible single-string arguments and new list-style arguments.
         include_tokens = _normalize_split_spec(include_splits if include_splits is not None else include_split)
         exclude_tokens = _normalize_split_spec(exclude_splits if exclude_splits is not None else exclude_split)
 
         fmris = []
-        for subj in self.subject_ids:
-            if self.readout_res == "voxels":
-                fmri = load_voxel_index(
-                    subj,
-                    include_split=include_tokens if include_tokens else None,
-                    exclude_split=exclude_tokens if exclude_tokens else None,
-                )
-                gm = "gm"
-                self.voxel_h5_paths[subj] = {
-                    "friends": Path(
-                        f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/friends/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
-                    ),
-                    "movie10": Path(
-                        f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/movie10/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
-                    ),
-                }
-            else:
-                fmri = load_fmri(root_data_dir, subj, self.readout_res)
-            self.fmri[subj] = fmri
-            fmris.append(fmri)
+        load_targets = not _tokens_request_only_no_target(include_tokens)
+        if load_targets:
+            for subj in self.subject_ids:
+                if self.readout_res == "voxels":
+                    fmri = load_voxel_index(
+                        subj,
+                        include_split=include_tokens if include_tokens else None,
+                        exclude_split=exclude_tokens if exclude_tokens else None,
+                    )
+                    gm = "gm"
+                    self.voxel_h5_paths[subj] = {
+                        "friends": Path(
+                            f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/friends/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
+                        ),
+                        "movie10": Path(
+                            f"/engram/nklab/eh2976/cneuromod_extract_tseries/outputs/movie10/Schaefer18_1000Parcels7Networks/sub-0{subj}/func/sub-0{subj}_voxel_timeseries_{gm}.h5"
+                        ),
+                    }
+                else:
+                    fmri = load_fmri(root_data_dir, subj, self.readout_res)
+                self.fmri[subj] = fmri
+                fmris.append(fmri)
+        else:
+            for subj in self.subject_ids:
+                self.fmri[subj] = {}
 
         # Known problematic chunks, kept excluded by default.
         self.always_excluded_splits = {"s04e01a", "s04e01b", "s04e13b", "s05e20a", "s06e03a"}
@@ -393,9 +522,12 @@ class algonauts_dataset(Dataset):
                         "split": split,
                         "ind": i,
                         "available_subjects": available_subjects,
+                        "has_targets": True,
                         "has_missing_targets": len(available_subjects) != len(self.subject_ids),
                     }
                 )
+
+        self._append_no_target_samples(include_tokens, exclude_tokens)
 
         del fmris
 
@@ -417,6 +549,8 @@ class algonauts_dataset(Dataset):
                 backbone=text_backbone,
                 cache_dir=cache_dir,
             )
+
+            self.text_silence_token = set_silence_token(self.text_processor)
 
         if "audio" in self.modality:
             # Support either `args.audio_backbone` (new) or `args.audio_bb` (legacy).
@@ -473,24 +607,15 @@ class algonauts_dataset(Dataset):
         # else:
         #     self.num_valid_voxels = int(self.masked_parcellation.shape[0])
 
-        self.stim_paths = {
-            "friends": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/friends_smaller.h5",
-            "movie10": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/movie10_smaller.h5",
-            "ood": "/engram/nklab/datasets/algonauts_2025.competitors/stimuli/movies/ood_smaller.h5",
-        }
-
         self.transcript_paths: Dict[str, str] = {}
         self._transcript_cache: Dict[str, pd.DataFrame] = {}
         for sample in self.samples:
             split = str(sample["split"])
             if split in self.transcript_paths:
                 continue
-            self.transcript_paths[split] = (
-                f"{root_data_dir}/algonauts_2025.competitors/stimuli/transcripts/"
-                + (f"friends/s{split[2]}/friends_{split}.tsv"
-                if re.match(r"^s\d\de\d\d[a-zA-Z]$", split)
-                else f"movie10/{split[:-2]}/movie10_{split}.tsv")
-            )
+            transcript_path = self._resolve_transcript_path(split)
+            if transcript_path is not None:
+                self.transcript_paths[split] = transcript_path
 
         # Per-process worker-local HDF5 handles, lazily opened to avoid repeated open/close overhead.
         self._stim_handles: Dict[Tuple[int, str], h5py.File] = {}
@@ -505,7 +630,131 @@ class algonauts_dataset(Dataset):
                 "Use one of ['mean_fill', 'strict']."
             )
 
-    def _get_transcript_df(self, split: str) -> pd.DataFrame:
+    def _load_sample_count_file(self, kind: str) -> Dict[str, int]:
+        if kind == "s7":
+            path = (
+                f"/engram/nklab/datasets/algonauts_2025.competitors/fmri/sub-0{self.subj}/target_sample_number/"
+                f"sub-0{self.subj}_friends-s7_fmri_samples.npy"
+            )
+        elif kind == "ood":
+            path = (
+                f"/engram/nklab/datasets/algonauts_2025.competitors/fmri/sub-0{self.subj}/target_sample_number/"
+                f"sub-0{self.subj}_ood_fmri_samples.npy"
+            )
+        else:
+            raise ValueError(f"Unsupported sample count kind: {kind}")
+
+        if not os.path.exists(path):
+            return {}
+
+        data = np.load(path, allow_pickle=True).item()
+        return {str(k): int(v) for k, v in data.items()}
+
+    def _resolve_requested_no_target_splits(
+        self,
+        include_tokens: List[str],
+        exclude_tokens: List[str],
+    ) -> List[str]:
+        if not include_tokens:
+            return []
+
+        selected: List[str] = []
+
+        s7_counts = self._load_sample_count_file("s7")
+        for split in sorted(s7_counts.keys()):
+            if split in self.always_excluded_splits:
+                continue
+            if _split_is_selected(split, include_tokens, exclude_tokens):
+                selected.append(split)
+
+        ood_counts = self._load_sample_count_file("ood")
+        for name in sorted(ood_counts.keys()):
+            split = f"ood_{name}"
+            if _split_is_selected(split, include_tokens, exclude_tokens):
+                selected.append(split)
+
+        return selected
+
+    def _infer_no_target_split_length_from_stim(self, split: str) -> int:
+        movie_type = self._movie_type_from_split(split)
+        stim_key = self._stim_split_key(split)
+        with h5py.File(self.stim_paths[movie_type], "r") as stim:
+            if stim_key not in stim:
+                raise KeyError(
+                    f"Split '{stim_key}' not found in {self.stim_paths[movie_type]} "
+                    f"(requested as '{split}')."
+                )
+            group = stim[stim_key]
+            if "audio" in group:
+                return int(group["audio"].shape[0])
+            if "video" in group:
+                return int(group["video"].shape[0])
+        raise RuntimeError(f"Unable to infer sample count for no-target split '{split}'.")
+
+    def _append_no_target_samples(self, include_tokens: List[str], exclude_tokens: List[str]) -> None:
+        requested = self._resolve_requested_no_target_splits(include_tokens, exclude_tokens)
+        if not requested:
+            return
+
+        s7_counts = self._load_sample_count_file("s7")
+        ood_counts = self._load_sample_count_file("ood")
+
+        existing = {(str(sample["split"]), int(sample["ind"])) for sample in self.samples}
+
+        for split in requested:
+            if split.startswith("s07e"):
+                split_len = int(s7_counts.get(split, 0))
+            elif split.startswith("ood_"):
+                split_len = int(ood_counts.get(split.split("_", 1)[1], 0))
+            else:
+                split_len = 0
+
+            if split_len <= 0:
+                split_len = self._infer_no_target_split_length_from_stim(split)
+
+            for i in range(split_len):
+                key = (split, i)
+                if key in existing:
+                    continue
+                self.timepoints.append([split, i])
+                self.samples.append(
+                    {
+                        "split": split,
+                        "ind": i,
+                        "available_subjects": [],
+                        "has_targets": False,
+                        "has_missing_targets": False,
+                    }
+                )
+                existing.add(key)
+
+    def _resolve_transcript_path(self, split: str) -> Optional[str]:
+        transcripts_root = f"{root_data_dir}/algonauts_2025.competitors/stimuli/transcripts"
+        movie_type = self._movie_type_from_split(split)
+
+        if movie_type == "friends":
+            path = f"{transcripts_root}/friends/s{split[2]}/friends_{split}.tsv"
+            return path if os.path.exists(path) else None
+
+        if movie_type == "ood":
+            name = split.split("_", 1)[1] if split.startswith("ood_") else split
+            family = re.sub(r"\d+$", "", name)
+            candidates = [
+                f"{transcripts_root}/ood/{family}/{split}.tsv",
+                f"{transcripts_root}/ood/{family}/{name}.tsv",
+                f"{transcripts_root}/ood/{family}/ood_{name}.tsv",
+            ]
+            for path in candidates:
+                if os.path.exists(path):
+                    return path
+            return None
+
+        path = f"{transcripts_root}/movie10/{split[:-2]}/movie10_{split}.tsv"
+        return path if os.path.exists(path) else None
+
+    def _get_transcript_df(self, split: str) -> Optional[pd.DataFrame]:
+        if split not in self.transcript_paths:
+            return None
         transcript_df = self._transcript_cache.get(split)
         if transcript_df is None:
             transcript_df = pd.read_csv(self.transcript_paths[split], sep="\t")
@@ -514,6 +763,12 @@ class algonauts_dataset(Dataset):
 
     def _movie_type_from_split(self, split: str) -> str:
         return _movie_type_from_split_name(split)
+
+    def _stim_split_key(self, split: str) -> str:
+        movie_type = self._movie_type_from_split(split)
+        if movie_type == "ood" and split.startswith("ood_"):
+            return split.split("_", 1)[1]
+        return split
 
     def _get_stim_handle(self, split: str):
         movie_type = self._movie_type_from_split(split)
@@ -697,31 +952,34 @@ class algonauts_dataset(Dataset):
         available_subjects = list(sample["available_subjects"])
         data_point = {"split": split, "ind": ind}
 
+        stim_split = self._stim_split_key(split)
+
         # --- FMRI (explicit/traceable target policy) ---
-        fmri_data = self._collect_fmri_targets(split, ind, available_subjects)
+        if bool(sample.get("has_targets", True)):
+            fmri_data = self._collect_fmri_targets(split, ind, available_subjects)
+        else:
+            fmri_data = {}
 
         if "text" in self.modality:
             # --- Text (cached transcript table per split) ---
             transcript_df = self._get_transcript_df(split)
-            context = extract_language_context(transcript_df, ind)
+            if transcript_df is not None:
+                context = extract_language_context(transcript_df, ind)
 
-            text_all = extract_text(context)
-            text = " ".join(text_all)
-            text = text if text.strip() else "[UNK]"
+                text_range = (5, 13) if self.text_backbone in {"metaclip", "openaiclip"} else None
 
-            if self.text_backbone in ["metaclip"]:
-                # Clip only allows for a certain number of tokens and then cuts off the text
-                text_all = extract_text(context, text_range=(5, 13)) # 
-                text_clip = ' '.join(text_all)
-                text_clip = text_clip if text_clip.strip() else "[UNK]"
-
-                # print(f"Split: {split}  Ind: {ind}")
-                # print(f"Original text: {text}")
-                # print(f"CLIP text: {text_clip}")
-
-                text_inputs = self.text_processor.process(text_clip)
+                text_all = extract_text(
+                    context,
+                    self.text_silence_token,
+                    text_range=text_range,
+                )
+                text_str = " ".join(text_all).strip()
+                text_str = text_str if text_str else self.text_silence_token
             else:
-                text_inputs = self.text_processor.process(text)
+                text_str = self.text_silence_token
+
+            # print(text_str)
+            text_inputs = self.text_processor.process(text_str)
 
             text_inputs = {k: v.squeeze(0) for k, v in text_inputs.items() }
             data_point["text"] = text_inputs
@@ -732,10 +990,10 @@ class algonauts_dataset(Dataset):
 
             if "video" in self.modality:
                 # --- Video ---
-                video_fps = stim[split]["video"].attrs["fps"]
+                video_fps = stim[stim_split]["video"].attrs["fps"]
                 end = int((ind + 1) * tr * video_fps)
                 start = max(int((ind - 14) * tr * video_fps), 0)
-                frames_ds = stim[split]["video"]
+                frames_ds = stim[stim_split]["video"]
 
                 if self.sample_hrf:
                     mean, std = -150, 50
@@ -745,18 +1003,18 @@ class algonauts_dataset(Dataset):
                     probs = truncnorm.pdf(all_frames, a, b, loc=mean, scale=std)
                     probs /= probs.sum()
                     sample_inds = np.random.choice(all_frames, size=self.num_frames, p=probs, replace=False)
-                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split, sample_inds)
+                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, stim_split, sample_inds)
                 else:
-                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, split)
+                    video_inputs = self.subsample_frames_lazy(stim, frames_ds, start, end, stim_split)
 
                 data_point["video"] = video_inputs
 
             if "audio" in self.modality:
                 # --- Audio ---
-                sr = stim[split]["audio"].attrs["sr"]
+                sr = stim[stim_split]["audio"].attrs["sr"]
                 end_audio = int((ind + 1) * tr * sr)
                 start_audio = max(int((ind - 14) * tr * sr), 0)
-                audio = np.asarray(stim[split]["audio"][start_audio:end_audio])
+                audio = np.asarray(stim[stim_split]["audio"][start_audio:end_audio])
                 audio_inputs = self.transform_audio(audio, sr)
                 data_point["audio"] = audio_inputs
 

@@ -31,6 +31,8 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--eval_only", action="store_true")
 	parser.add_argument("--save_checkpoints", action="store_true")
 	parser.add_argument("--save_test_predictions", action="store_true")
+	parser.add_argument("--save_test_movie_breakdown", action="store_true")
+	parser.add_argument("--save_test_causal_intervention", action="store_true")
 
     # Data/model hyperparameters
 	parser.add_argument("--subj", "--sub", "--train_subj", dest="subj", default=1, type=int)
@@ -56,5 +58,20 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--pre_norm", default=1, type=int)
 	parser.add_argument("--enc_output_layer", default=-1, type=int)
 	parser.add_argument("--modality_dropout", default=0.2, type=float)
+	parser.add_argument("--attn_maps", action="store_true")
+	parser.add_argument(
+		"--attn_write_mode",
+		choices=["batch", "sample"],
+		default="batch",
+		type=str,
+		help="How to write batched attention maps to HDF5 during export.",
+	)
+	parser.add_argument(
+		"--attn_compression",
+		choices=["none", "lzf", "gzip"],
+		default="lzf",
+		type=str,
+		help="Compression mode for exported attention maps.",
+	)
 
 	return parser

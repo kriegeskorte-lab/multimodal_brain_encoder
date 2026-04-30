@@ -3,29 +3,31 @@ set -euo pipefail
 
 # Training script for multimodal_encoder/main.py
 # Override any variable below via env, e.g.:
-#   SUBJ=3 EPOCHS=30 BATCH_SIZE=4 ./scripts/train.sh
+#   SUBJ=2 EPOCHS=30 BATCH_SIZE=4 ./scripts/train.sh
 
 SUBJ=5
 TARGET_SUBJ=5
 EPOCHS=10
-BATCH_SIZE=28
+BATCH_SIZE=20
 NUM_WORKERS=4
 LR=1e-4
 STEP_SIZE=4
 STEP_SIZE_GAMMA=0.5 # do not change for now
-WEIGHT_DECAY=1e-3
+WEIGHT_DECAY=5e-3
 TRAIN_SPLITS="friends-train-default"
 VAL_SPLITS="friends-test-default"
 TEST_SPLITS="movie10-ood-default"
 
-MODALITY=(video audio text)
-VIDEO_BACKBONE="metaclip"
-AUDIO_BACKBONE="whisper"
-TEXT_BACKBONE="metaclip"
+# MODALITY=(video audio text)
+MODALITY=(text)
+VIDEO_BACKBONE="videomae"
+AUDIO_BACKBONE="wav2vec"
+TEXT_BACKBONE="deberta"
 # VIDEO_BACKBONE="dino"
 # AUDIO_BACKBONE="whisper"
 # TEXT_BACKBONE="llama"
-MODALITY_DROPOUT=0.3
+MODALITY_DROPOUT=0.2
+READOUT_FMRI="voxels" # "parcels" or "voxels"
 
 HIDDEN_DIM=768
 DIM_FEEDFORWARD=1024
@@ -57,7 +59,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 pixi run accelerate launch \
   --config_file .accelerate/config.yaml \
-  --main_process_port 29504 \
+  --main_process_port 29505 \
   main.py \
   --subj "$SUBJ" \
   --target_subj "$TARGET_SUBJ" \
@@ -82,4 +84,5 @@ pixi run accelerate launch \
   --nheads "$NHEADS" \
   --num_queries "$NUM_QUERIES" \
   --modality_dropout "$MODALITY_DROPOUT" \
+  --readout_res "$READOUT_FMRI" \
   "${WANDB_FLAGS[@]}"

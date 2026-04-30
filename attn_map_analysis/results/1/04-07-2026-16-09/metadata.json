@@ -1,0 +1,39 @@
+{
+  "subject_id": 1,
+  "run_name": "04-07-2026-16-09",
+  "source_run_dir": "attn_maps/1/04-07-2026-16-09",
+  "modalities": [
+    "video",
+    "audio",
+    "text"
+  ],
+  "modality_backbones": {
+    "video": "dino",
+    "audio": "whisper",
+    "text": "llama"
+  },
+  "modality_token_ranges": {
+    "video": [
+      0,
+      3216
+    ],
+    "audio": [
+      3216,
+      4716
+    ],
+    "text": [
+      4716,
+      5228
+    ]
+  },
+  "num_units": 1,
+  "unit_names": [
+    "figures"
+  ],
+  "num_queries": 1000,
+  "num_heads": 16,
+  "combined_weighting": "implicit_sample_weighting_via_streamed_global_sums",
+  "manifest_checkpoint": "ckpt/1/04-07-2026-16-09/best.pt",
+  "manifest_test_splits": "movie10-attn-probing",
+  "normalization_note": "Normalized attention divides by static backbone token counts because valid-token masks are not saved by the exporter."
+}

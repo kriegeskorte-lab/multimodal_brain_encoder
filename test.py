@@ -42,6 +42,8 @@ def _subset_for_sanity(dataset, max_batches: int, batch_size: int):
 
 def _build_test_loader(args, split_spec: str) -> DataLoader:
     dataset = algonauts_dataset(args, include_splits=split_spec)
+    args.valid_voxel_mask = dataset.valid_voxel_mask if args.readout_res == "voxels" else None
+    args.masked_parcellation = dataset.masked_parcellation if args.readout_res == "voxels" else None
 
     if args.pipeline_sanity_check:
         dataset = _subset_for_sanity(dataset, args.sanity_batches, args.batch_size)
@@ -52,7 +54,7 @@ def _build_test_loader(args, split_spec: str) -> DataLoader:
         shuffle=False,
         drop_last=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=False,
         persistent_workers=False,
         prefetch_factor=None if args.num_workers <= 1 else 2,
     )
@@ -108,13 +110,6 @@ def main() -> None:
     mp_mode = "bf16" if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else "fp16"
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], mixed_precision=mp_mode)
 
-    criterion = MSECriterion()
-    model = NeuroEncoder(args)
-
-    ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
-    model.load_state_dict(ckpt["model"], strict=False)
-    accelerator.print(f"Best checkpoint loaded from {ckpt['epoch']} with best_val_acc={ckpt.get('best_val_acc', 'N/A')}")
-
     test_tokens = _normalize_split_spec(args.test_splits)
     eval_units = _expand_split_tokens(test_tokens)
     if len(eval_units) == 0:
@@ -122,6 +117,13 @@ def main() -> None:
 
     unit_loaders = {unit: _build_test_loader(args, unit) for unit in eval_units}
     all_test_loader = _build_test_loader(args, args.test_splits)
+
+    criterion = MSECriterion()
+
+    model = NeuroEncoder(args)
+    ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model"], strict=False)
+    accelerator.print(f"Best checkpoint loaded from {ckpt['epoch']} with best_val_acc={ckpt.get('best_val_acc', 'N/A')}")
 
     prepared = accelerator.prepare(model, *unit_loaders.values(), all_test_loader)
     model = prepared[0]
@@ -209,10 +211,25 @@ def main() -> None:
             "macro_average": macro_avg,
             "overall": overall,
         }
-        out_path = output_dir / "test_movie_breakdown.json"
+        if args.save_test_causal_intervention:
+            all_modalities = {"video", "audio", "text"}
+            removed = all_modalities - set(args.modality)
+            assert len(removed) == 1, (
+                f"Expected exactly one removed modality for causal breakdown, "
+                f"but got removed={removed}, active={args.modality}"
+            )
+            removed_modality = next(iter(removed))
+            out_path = output_dir / f"test_causal_{removed_modality}.json"
+        elif args.save_test_movie_breakdown:
+            out_path = output_dir / "test_movie_breakdown.json"
+        else:
+            out_path = output_dir / "test_summary.json"
         with out_path.open("w") as f:
             json.dump(summary, f, indent=2)
         accelerator.print(f"Saved per-movie summary to {out_path}")
+
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
 
 
 if __name__ == "__main__":

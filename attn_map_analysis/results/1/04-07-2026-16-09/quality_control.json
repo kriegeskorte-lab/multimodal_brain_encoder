@@ -1,0 +1,31 @@
+{
+  "subject_id": 1,
+  "run_name": "04-07-2026-16-09",
+  "source_run_dir": "attn_maps/1/04-07-2026-16-09",
+  "chunk_size": 1,
+  "max_samples": null,
+  "num_units": 1,
+  "num_samples_analyzed": 4863,
+  "unit_summaries": [
+    {
+      "unit": "figures",
+      "num_samples_analyzed": 4863,
+      "num_samples_saved": 4863,
+      "num_heads": 16,
+      "num_queries": 1000,
+      "num_memory_tokens": 5228,
+      "attn_maps_shape": [
+        4863,
+        16,
+        1000,
+        5228
+      ]
+    }
+  ],
+  "attn_sum_axis_last_min": 0.9996455907821655,
+  "attn_sum_axis_last_max": 1.0003817081451416,
+  "attn_sum_axis_last_mean_abs_error": 1.584367317312445e-05,
+  "attn_sum_axis_last_max_abs_error": 0.00038170814514160156,
+  "attn_sum_axis_last_within_tolerance": true,
+  "qc_tolerance": 0.005
+}

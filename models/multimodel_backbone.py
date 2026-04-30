@@ -20,26 +20,28 @@ from transformers import (
     Wav2Vec2Processor,
     WhisperModel,
     WhisperProcessor,
+    CLIPTextModel,
+    CLIPVisionModel,
 )
+import open_clip
 
 
 BACKBONE_LIST = {
     "text": {
         "llama": "meta-llama/Llama-3.2-1B",
         "deberta": "microsoft/deberta-v3-base",
-        # "metaclip": "facebook/metaclip-2-worldwide-m16",
         "metaclip": "facebook/metaclip-2-worldwide-l14",
+        "openaiclip": "openai/clip-vit-large-patch14"
     },
     "video": {
         "timesformer": "facebook/timesformer-base-finetuned-k400",
         "videomae": "OpenGVLab/VideoMAEv2-Base",
         "dino": "facebook/dinov3-vitb16-pretrain-lvd1689m",
-        # "metaclip": "facebook/metaclip-2-worldwide-m16", 
         "metaclip": "facebook/metaclip-2-worldwide-b16",
+        "openaiclip": "openai/clip-vit-large-patch14"
         # "eupe": "facebook/EUPE-ViT-B",
     },
     "audio": {
-        # "wav2vec": "facebook/wav2vec2-base-960h",
         "wav2vec": "facebook/w2v-bert-2.0",
         "whisper": "openai/whisper-small",
     },
@@ -103,6 +105,12 @@ class ProcessorWrapper:
                     use_fast=True,
                     cache_dir=self.cache_dir,
                 )
+            if self.backbone == "openaiclip":
+                return AutoTokenizer.from_pretrained(
+                    self.model_name,
+                    use_fast=True,
+                    cache_dir=self.cache_dir,
+                )
 
         if self.modality == "audio":
             if self.backbone == "whisper":
@@ -117,11 +125,6 @@ class ProcessorWrapper:
                     cache_dir=self.cache_dir,
                     use_fast=True,
                 )
-                # return Wav2Vec2Processor.from_pretrained(
-                #     self.model_name,
-                #     cache_dir=self.cache_dir,
-                #     use_fast=True,
-                # )
 
         if self.modality == "video":
             if self.backbone == "metaclip":
@@ -146,12 +149,18 @@ class ProcessorWrapper:
                     cache_dir=self.cache_dir,
                     use_fast=False,
                 )
+            if self.backbone == "openaiclip":
+                return AutoProcessor.from_pretrained(
+                    self.model_name,
+                    cache_dir=self.cache_dir,
+                    use_fast=True,
+                )
 
         raise ValueError(f"Unsupported modality/backbone pair: {self.modality}/{self.backbone}")
 
     def process(self, data: Any, **kwargs: Any) -> TensorLikeDict:
         if self.modality == "text":
-            max_length = 77 if self.backbone == "metaclip" else 512
+            max_length = 77 if self.backbone in ["metaclip", "openaiclip"] else 512
             return self.processor(
                 text=data,
                 padding="max_length",
@@ -169,7 +178,7 @@ class ProcessorWrapper:
             )
 
         if self.modality == "video":
-            if self.backbone in {"metaclip", "dino"}:
+            if self.backbone in {"metaclip", "dino", "openaiclip"}:
                 # print(f"Original video input shape: {len(data)} videos") # 2 videos with 16 frames each
                 return self.processor(images=data, return_tensors="pt") # torch.Size([16, 3, 224, 224])
             
@@ -216,6 +225,12 @@ class FeatureWrapper(torch.nn.Module):
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
                 )
+            if self.backbone == "openaiclip":
+                return CLIPTextModel.from_pretrained(
+                    self.model_name,
+                    use_safetensors=True,
+                    cache_dir=self.cache_dir,
+                )
 
         if self.modality == "audio":
             if self.backbone == "whisper":
@@ -230,11 +245,6 @@ class FeatureWrapper(torch.nn.Module):
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
                 )
-                # return Wav2Vec2Model.from_pretrained(
-                #     self.model_name,
-                #     use_safetensors=True,
-                #     cache_dir=self.cache_dir,
-                # )
 
         if self.modality == "video":
             if self.backbone == "metaclip":
@@ -261,6 +271,12 @@ class FeatureWrapper(torch.nn.Module):
                 )
             if self.backbone == "timesformer":
                 return TimesformerModel.from_pretrained(
+                    self.model_name,
+                    use_safetensors=True,
+                    cache_dir=self.cache_dir,
+                )
+            if self.backbone == "openaiclip":
+                return CLIPVisionModel.from_pretrained(
                     self.model_name,
                     use_safetensors=True,
                     cache_dir=self.cache_dir,
@@ -293,7 +309,7 @@ class FeatureWrapper(torch.nn.Module):
         device = next(self.parameters()).device
         inputs = to_device(inputs, device)
 
-        if self.modality == "video" and self.backbone in {"metaclip", "dino"}:
+        if self.modality == "video" and self.backbone in {"metaclip", "dino", "openaiclip"}:
             pixel_values = inputs["pixel_values"]
             if pixel_values.ndim == 5:
                 batch_size, time_steps, channels, height, width = pixel_values.shape
@@ -329,11 +345,11 @@ class FeatureWrapper(torch.nn.Module):
         if self.modality == "audio":
             return outputs.last_hidden_state
 
-        if self.modality == "video" and self.backbone in {"metaclip", "dino"}:
+        if self.modality == "video" and self.backbone in {"metaclip", "dino", "openaiclip"}:
             batch_size = kwargs.get("batch_size")
             time_steps = kwargs.get("time_steps")
             if batch_size is None or time_steps is None:
-                raise ValueError("batch_size and time_steps are required for metaclip/dino video inference")
+                raise ValueError("batch_size and time_steps are required for metaclip/dino/openaiclip video inference")
             hidden_states = outputs.last_hidden_state
             hidden_size = hidden_states.shape[-1]
             return hidden_states.reshape(batch_size, time_steps, -1, hidden_size)
@@ -362,6 +378,20 @@ def _flatten_video_frames(videos_or_frames: Any) -> List[Any]:
     if isinstance(first_item, Sequence) and not isinstance(first_item, (bytes, str)):
         return [frame for video in videos_or_frames for frame in video]
     return list(videos_or_frames)
+
+def inspect_special_tokens(tokenizer):
+    print("=== Special Tokens ===")
+    print("bos_token:", tokenizer.bos_token, tokenizer.bos_token_id)
+    print("eos_token:", tokenizer.eos_token, tokenizer.eos_token_id)
+    print("pad_token:", tokenizer.pad_token, tokenizer.pad_token_id)
+    print("unk_token:", tokenizer.unk_token, tokenizer.unk_token_id)
+
+    # Not all tokenizers have sep
+    sep_token = getattr(tokenizer, "sep_token", None)
+    sep_token_id = getattr(tokenizer, "sep_token_id", None)
+    print("sep_token:", sep_token, sep_token_id)
+
+    print("\nAll special tokens:", tokenizer.special_tokens_map)
 
 
 if __name__ == "__main__":
@@ -400,6 +430,9 @@ if __name__ == "__main__":
                 "At Columbia's Zuckerman Institute, we believe that understanding how the brain works is an urgent and exciting challenge.",
             ]
             inputs = processor_wrapper.process(samples)
+
+            tokenizer = processor_wrapper.processor
+            inspect_special_tokens(tokenizer)
 
         elif modality == "audio":
             def extract_audio_segment(stim_audio, sr, ind, tr, context=14):
@@ -456,7 +489,7 @@ if __name__ == "__main__":
             time_steps = len(videos[0])
             inputs = processor_wrapper.process(videos) 
             # print("mbb test:", inputs['pixel_values'].shape) # torch.Size([32, 3, 224, 224]) after flattening frames in processor
-            if backbone in {"dino", "metaclip"}:
+            if backbone in {"dino", "metaclip", "openaiclip"}:
                 infer_kwargs["batch_size"] = batch_size
                 infer_kwargs["time_steps"] = time_steps
 
@@ -478,15 +511,17 @@ if __name__ == "__main__":
 
     # Toggle these for quick checks.
     tests = [
-        # ("text", "deberta"),
-        # ("text", "llama"),
+        ("text", "deberta"),
+        ("text", "llama"),
         ("text", "metaclip"),
+        ("text", "openaiclip"),
         # ("audio", "wav2vec"),
         # ("audio", "whisper"),
         # ("video", "videomae"),
         # ("video", "timesformer"),
         # ("video", "dino"),
-        ("video", "metaclip"),
+        # ("video", "metaclip"),
+        # ("video", "openaiclip"),
     ]
 
     for modality_name, backbone_name in tests:
@@ -535,4 +570,12 @@ Testing video/metaclip with model: facebook/metaclip-2-worldwide-m16
 Input keys: ['pixel_values']                                                  
 Feature shape: torch.Size([2, 16, 197, 512])  # 197 = 14 * 14 + 1 (cls token)                                    
 ================================================== 
+Testing video/openaiclip with model: openai/clip-vit-large-patch14
+Input keys: ['pixel_values']
+Feature shape: torch.Size([2, 16, 257, 1024]) # 257 = 16 * 16 + 1 (cls tokens)
+==================================================
+Testing text/openaiclip with model: openai/clip-vit-large-patch14
+Input keys: ['input_ids', 'attention_mask']
+Feature shape: torch.Size([2, 77, 768])
+==================================================
 '''
