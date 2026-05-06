@@ -1,7 +1,7 @@
 {
   "subject_id": 3,
   "run_name": "04-08-2026-00-52",
-  "source_run_dir": "attn_maps/3/04-08-2026-00-52",
+  "source_run_dir": "/engram/nklab/pf2477/multimodal_encoder/attn_maps/3/04-08-2026-00-52",
   "chunk_size": 1,
   "max_samples": null,
   "num_units": 1,
@@ -11,21 +11,37 @@
       "unit": "figures",
       "num_samples_analyzed": 4863,
       "num_samples_saved": 4863,
-      "num_heads": 16,
+      "num_heads": 1,
+      "stored_num_heads": 1,
+      "model_num_heads": 16,
       "num_queries": 1000,
       "num_memory_tokens": 5228,
+      "attention_head_aggregation": "mean",
       "attn_maps_shape": [
         4863,
-        16,
+        1,
         1000,
         5228
-      ]
+      ],
+      "num_time_windows": 0
     }
   ],
-  "attn_sum_axis_last_min": 0.9996146559715271,
-  "attn_sum_axis_last_max": 1.0003618001937866,
-  "attn_sum_axis_last_mean_abs_error": 1.578840415801454e-05,
-  "attn_sum_axis_last_max_abs_error": 0.0003853440284729004,
+  "stored_num_heads": 1,
+  "model_num_heads": 16,
+  "attention_head_aggregation": "mean",
+  "time_window_config": {
+    "enabled": false,
+    "window_size": null,
+    "window_stride": 1,
+    "num_time_windows": 0
+  },
+  "attn_sum_axis_last_min": 0.9999438524246216,
+  "attn_sum_axis_last_max": 1.0000603199005127,
+  "attn_sum_axis_last_mean_abs_error": 5.748740456953917e-06,
+  "attn_sum_axis_last_max_abs_error": 6.031990051269531e-05,
   "attn_sum_axis_last_within_tolerance": true,
-  "qc_tolerance": 0.005
+  "qc_tolerance": 0.005,
+  "token_fraction_row_sum_min": 0.9999998641815182,
+  "token_fraction_row_sum_max": 1.0000001368935045,
+  "token_fraction_row_sum_mean_abs_error": 3.364504220826347e-08
 }

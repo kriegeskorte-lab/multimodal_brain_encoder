@@ -1,7 +1,7 @@
 {
   "subject_id": 2,
   "run_name": "04-08-2026-23-48",
-  "source_run_dir": "attn_maps/2/04-08-2026-23-48",
+  "source_run_dir": "/engram/nklab/pf2477/multimodal_encoder/attn_maps/2/04-08-2026-23-48",
   "chunk_size": 1,
   "max_samples": null,
   "num_units": 1,
@@ -11,21 +11,34 @@
       "unit": "figures",
       "num_samples_analyzed": 4883,
       "num_samples_saved": 4883,
-      "num_heads": 16,
+      "num_heads": 1,
+      "stored_num_heads": 1,
+      "model_num_heads": 16,
       "num_queries": 1000,
       "num_memory_tokens": 5228,
+      "attention_head_aggregation": "mean",
       "attn_maps_shape": [
         4883,
-        16,
+        1,
         1000,
         5228
-      ]
+      ],
+      "num_time_windows": 0
     }
   ],
-  "attn_sum_axis_last_min": 0.9995962977409363,
-  "attn_sum_axis_last_max": 1.0003710985183716,
-  "attn_sum_axis_last_mean_abs_error": 2.505600720814889e-05,
-  "attn_sum_axis_last_max_abs_error": 0.0004037022590637207,
+  "stored_num_heads": 1,
+  "model_num_heads": 16,
+  "attention_head_aggregation": "mean",
+  "time_window_config": {
+    "enabled": false,
+    "window_size": null,
+    "window_stride": 1,
+    "num_time_windows": 0
+  },
+  "attn_sum_axis_last_min": 0.999906063079834,
+  "attn_sum_axis_last_max": 1.0000921487808228,
+  "attn_sum_axis_last_mean_abs_error": 9.1860709243101e-06,
+  "attn_sum_axis_last_max_abs_error": 9.393692016601562e-05,
   "attn_sum_axis_last_within_tolerance": true,
   "qc_tolerance": 0.005
 }

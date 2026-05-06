@@ -1,7 +1,7 @@
 {
   "subject_id": 1,
   "run_name": "04-08-2026-23-43",
-  "source_run_dir": "attn_maps/1/04-08-2026-23-43",
+  "source_run_dir": "/engram/nklab/pf2477/multimodal_encoder/attn_maps/1/04-08-2026-23-43",
   "modalities": [
     "video",
     "audio",
@@ -31,9 +31,53 @@
     "figures"
   ],
   "num_queries": 1000,
-  "num_heads": 16,
+  "num_heads": 1,
+  "stored_num_heads": 1,
+  "model_num_heads": 16,
+  "attention_head_aggregation": "mean",
+  "is_head_averaged": true,
   "combined_weighting": "implicit_sample_weighting_via_streamed_global_sums",
   "manifest_checkpoint": "ckpt/1/04-08-2026-23-43/best.pt",
   "manifest_test_splits": "movie10-attn-probing",
-  "normalization_note": "Normalized attention divides by static backbone token counts because valid-token masks are not saved by the exporter."
+  "normalization_note": "Normalized attention divides by static backbone token counts because valid-token masks are not saved by the exporter.",
+  "top_token_preference": {
+    "enabled": true,
+    "top_token_fractions": [
+      0.1,
+      0.25,
+      0.5
+    ],
+    "primary_top_token_fraction": 0.25,
+    "primary_suffix": "top25pct",
+    "score_file": "parcel_modality_attn_top_token_mean.npy",
+    "fraction_file": "parcel_modality_attn_top_token_fraction.npy",
+    "outputs": [
+      {
+        "fraction": 0.1,
+        "suffix": "top10pct",
+        "score_file": "parcel_modality_attn_top_token_mean_top10pct.npy",
+        "fraction_file": "parcel_modality_attn_top_token_fraction_top10pct.npy"
+      },
+      {
+        "fraction": 0.25,
+        "suffix": "top25pct",
+        "score_file": "parcel_modality_attn_top_token_mean_top25pct.npy",
+        "fraction_file": "parcel_modality_attn_top_token_fraction_top25pct.npy"
+      },
+      {
+        "fraction": 0.5,
+        "suffix": "top50pct",
+        "score_file": "parcel_modality_attn_top_token_mean_top50pct.npy",
+        "fraction_file": "parcel_modality_attn_top_token_fraction_top50pct.npy"
+      }
+    ],
+    "note": "For each parcel and modality, the score is the mean attention over the top fraction of tokens within that modality, averaged over samples, unit shards, and stored head slots. Fractions normalize those top-token scores across modalities within each parcel. The unsuffixed score_file and fraction_file are aliases for primary_suffix."
+  },
+  "legacy_output_note": "Files with 'per_head' or 'head_' in the name refer to stored head slots. When attention_head_aggregation='mean', there is a single stored slot that already represents the average over model heads.",
+  "time_window_config": {
+    "enabled": false,
+    "window_size": null,
+    "window_stride": 1,
+    "num_time_windows": 0
+  }
 }

@@ -89,9 +89,27 @@ class RunningPearson:
         corr = torch.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
         return corr.mean()
 
-    def finalize(self, accelerator, eps: float = 1e-8) -> float:
+    @staticmethod
+    def _corr_from_stats(
+        n: torch.Tensor,
+        sum_x: torch.Tensor,
+        sum_y: torch.Tensor,
+        sum_x2: torch.Tensor,
+        sum_y2: torch.Tensor,
+        sum_xy: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        cov = sum_xy - (sum_x * sum_y) / n
+        var_x = sum_x2 - (sum_x * sum_x) / n
+        var_y = sum_y2 - (sum_y * sum_y) / n
+
+        denom = torch.sqrt(torch.clamp(var_x, min=0.0) * torch.clamp(var_y, min=0.0) + eps)
+        corr = cov / denom
+        return torch.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _finalize_corr(self, accelerator, eps: float = 1e-8) -> torch.Tensor:
         if self.sum_x is None:
-            return 0.0
+            return torch.empty(0, device=accelerator.device, dtype=torch.float32)
 
         n_tensor = torch.tensor([float(self.n)], device=self.sum_x.device, dtype=self.sum_x.dtype)
         n_tensor = accelerator.reduce(n_tensor, reduction="sum")
@@ -104,15 +122,20 @@ class RunningPearson:
 
         n = n_tensor[0]
         if float(n.item()) <= 0:
-            return 0.0
-        cov = sum_xy - (sum_x * sum_y) / n
-        var_x = sum_x2 - (sum_x * sum_x) / n
-        var_y = sum_y2 - (sum_y * sum_y) / n
+            return torch.zeros_like(sum_x)
+        return self._corr_from_stats(n, sum_x, sum_y, sum_x2, sum_y2, sum_xy, eps)
 
-        denom = torch.sqrt(torch.clamp(var_x, min=0.0) * torch.clamp(var_y, min=0.0) + eps)
-        corr = cov / denom
-        corr = torch.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+    def finalize(self, accelerator, eps: float = 1e-8) -> float:
+        corr = self._finalize_corr(accelerator, eps=eps)
+        if corr.numel() == 0:
+            return 0.0
         return float(corr.mean().item())
+
+    def finalize_with_vector(self, accelerator, eps: float = 1e-8) -> tuple[float, torch.Tensor]:
+        corr = self._finalize_corr(accelerator, eps=eps)
+        if corr.numel() == 0:
+            return 0.0, corr
+        return float(corr.mean().item()), corr
 
 
 def reduce_running_mean(loss_meter: RunningMean, accelerator) -> float:

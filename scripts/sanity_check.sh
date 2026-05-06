@@ -6,24 +6,26 @@ set -euo pipefail
 # Example:
 #   SUBJ=1 SANITY_BATCHES=2 ./scripts/sanity_check.sh
 
-SUBJ=1
-TARGET_SUBJ=1
+SUBJ=2
+TARGET_SUBJ=2
 BATCH_SIZE=4
 NUM_WORKERS=0
 EPOCHS=5
 SANITY_BATCHES=8
 
-HIDDEN_DIM=256
-DIM_FEEDFORWARD=512
+HIDDEN_DIM=768
+DIM_FEEDFORWARD=1024
 ENC_LAYERS=0
 DEC_LAYERS=1
-NHEADS=8
+NHEADS=16
 NUM_QUERIES=1000
 
 MODALITY=(video audio text)
-VIDEO_BACKBONE="metaclip"
+VIDEO_BACKBONE="dino"
 AUDIO_BACKBONE="whisper"
-TEXT_BACKBONE="metaclip"
+TEXT_BACKBONE="llama"
+
+READOUT_FMRI="voxels"
 
 # bash scripts/sanity_check.sh
 pixi run accelerate launch \
@@ -46,3 +48,4 @@ pixi run accelerate launch \
   --video_backbone "$VIDEO_BACKBONE" \
   --audio_backbone "$AUDIO_BACKBONE" \
   --text_backbone "$TEXT_BACKBONE" \
+  --readout_res "$READOUT_FMRI" 

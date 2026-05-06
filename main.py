@@ -142,6 +142,11 @@ def main() -> None:
 		model.eval()
 		_ = model(dry_samples)
 		model.train()
+
+	trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+	total_params = sum(p.numel() for p in model.parameters())
+	accelerator.print(f"Trainable parameters: {trainable_params:,} / {total_params:,}")
+	accelerator.print(f"Trainable parameters: {trainable_params / total_params:.4f}")
 	
 	criterion = MSECriterion()
 	optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

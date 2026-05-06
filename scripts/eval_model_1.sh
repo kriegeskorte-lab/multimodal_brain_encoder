@@ -6,15 +6,15 @@ set -euo pipefail
 #   bash ./scripts/eval.sh
 
 # SUBJECTS=(1 2 3 5 1 2 3 5 1 2 3 5 1 2 3 5)
-# SUBJECTS=(1 2 3 5 1 2 3 5 1 2 3 5)
-SUBJECTS=(1 1 1 1 1 1 1)
+SUBJECTS=(1 2 3 5 1 2 3 5)
+# SUBJECTS=(1 1 1 1 1 1 1)
 # SUBJECTS=(1 2 3 5)
 
 RESUMES=(
-    # "ckpt/1/04-07-2026-16-09/best.pt" # video audio text
-    # "ckpt/2/04-07-2026-16-13/best.pt" # video audio text
-    # "ckpt/3/04-08-2026-00-52/best.pt" # video audio text
-    # "ckpt/5/04-08-2026-00-55/best.pt" # video audio text
+    "ckpt/1/04-07-2026-16-09/best.pt" # video audio text
+    "ckpt/2/04-07-2026-16-13/best.pt" # video audio text
+    "ckpt/3/04-08-2026-00-52/best.pt" # video audio text
+    "ckpt/5/04-08-2026-00-55/best.pt" # video audio text
     # "ckpt/1/04-08-2026-13-27/best.pt" # video
     # "ckpt/2/04-08-2026-13-29/best.pt" # video
     # "ckpt/3/04-08-2026-13-49/best.pt" # video
@@ -27,10 +27,10 @@ RESUMES=(
     # "ckpt/2/04-09-2026-11-43/best.pt" # text
     # "ckpt/3/04-09-2026-11-45/best.pt" # text
     # "ckpt/5/04-09-2026-14-20/best.pt" # text
-    # "ckpt/1/04-08-2026-23-43/best.pt" # video audio text
-    # "ckpt/2/04-08-2026-23-48/best.pt" # video audio text
-    # "ckpt/3/04-08-2026-23-57/best.pt" # video audio text
-    # "ckpt/5/04-12-2026-19-49/best.pt" # video audio text
+    "ckpt/1/04-08-2026-23-43/best.pt" # video audio text
+    "ckpt/2/04-08-2026-23-48/best.pt" # video audio text
+    "ckpt/3/04-08-2026-23-57/best.pt" # video audio text
+    "ckpt/5/04-12-2026-19-49/best.pt" # video audio text
     # "ckpt/1/04-09-2026-14-21/best.pt" # video
     # "ckpt/2/04-09-2026-14-52/best.pt" # video
     # "ckpt/3/04-09-2026-16-52/best.pt" # video
@@ -62,23 +62,6 @@ RESUMES=(
 )
 
 MODALITIES=(
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video"
-    # "video"
-    # "video"
-    # "video"
-    # "audio"
-    # "audio"
-    # "audio"
-    # "audio"
-    # "text"
-    # "text"
-    # "text"
-    # "text"
-    # "video audio text"
     "video audio text"
     "video audio text"
     "video audio text"
@@ -86,21 +69,25 @@ MODALITIES=(
     "video audio text"
     "video audio text"
     "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
-    # "video audio text"
+    "video audio text"
+)
+
+READOUTS=(
+    "parcels"
+    "parcels"
+    "parcels"
+    "parcels"
+    "voxels"
+    "voxels"
+    "voxels"
+    "voxels"
 )
 
 VIDEO_BACKBONE="dino"
 AUDIO_BACKBONE="whisper"
 TEXT_BACKBONE="llama"
 
-READOUT_FMRI="voxels" # "parcels" or "voxels"
+# READOUT_FMRI="voxels" # "parcels" or "voxels"
 # MODALITY="video audio text"
 
 BATCH_SIZE=32
@@ -122,6 +109,7 @@ fi
 for i in "${!SUBJECTS[@]}"; do
   subj="${SUBJECTS[$i]}"
   resume="${RESUMES[$i]}"
+  readout="${READOUTS[$i]}"
   mod="${MODALITIES[$i]}"
   read -r -a modality <<< "$mod"
   echo "modality tokens: ${modality[*]}"
@@ -146,6 +134,7 @@ for i in "${!SUBJECTS[@]}"; do
     --dec_layers "$DEC_LAYERS" \
     --nheads "$NHEADS" \
     --num_queries "$NUM_QUERIES" \
-    --readout_res "$READOUT_FMRI" \
+    --readout_res "$readout" \
+    --save_encoding_acc \
     --save_test_movie_breakdown
 done

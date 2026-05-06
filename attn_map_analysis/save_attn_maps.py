@@ -160,12 +160,37 @@ def _write_attention_batch(
         ind_ds[dst_idx] = inds[offset]
 
 
+def _prepare_attention_batch(
+    layer_attn: torch.Tensor,
+) -> tuple[np.ndarray, int, str]:
+    if layer_attn.ndim == 3:
+        # `average_attn_weights=True` returns [B, Q, T]. Keep a singleton head
+        # axis on disk so the existing analysis code can continue to read [B, H, Q, T].
+        layer_attn = layer_attn.unsqueeze(1)
+        saved_num_heads = 1
+        head_aggregation = "mean"
+    elif layer_attn.ndim == 4:
+        saved_num_heads = int(layer_attn.shape[1])
+        head_aggregation = "none"
+    else:
+        raise RuntimeError(
+            f"Unexpected attention map rank {layer_attn.ndim}; expected 3 [B, Q, T] "
+            "for head-averaged attention or 4 [B, H, Q, T] for per-head attention."
+        )
+
+    attn_maps = np.ascontiguousarray(
+        layer_attn.detach().to(dtype=torch.float16).cpu().numpy()
+    )
+    return attn_maps, saved_num_heads, head_aggregation
+
+
 def _attention_writer_worker(
     out_path: Path,
     unit: str,
     num_samples: int,
     write_mode: str,
     compression: str,
+    model_num_heads: int,
     pending_writes: "queue.Queue[Optional[tuple[int, int, np.ndarray, List[str], List[int]]]]",
     writer_state: Dict[str, Any],
 ) -> None:
@@ -205,9 +230,13 @@ def _attention_writer_worker(
                             **_attn_dataset_kwargs(compression, chunk_shape),
                         )
                         h5f.attrs["num_heads"] = int(n_heads)
+                        h5f.attrs["model_num_heads"] = int(model_num_heads)
                         h5f.attrs["num_queries"] = int(n_queries)
                         h5f.attrs["num_memory_tokens"] = int(n_tokens)
                         h5f.attrs["decoder_layers_saved"] = 1
+                        h5f.attrs["attention_head_aggregation"] = str(
+                            writer_state.get("head_aggregation", "unknown")
+                        )
                         writer_state["attn_shape"] = [int(n_heads), int(n_queries), int(n_tokens)]
 
                     _write_attention_batch(
@@ -284,6 +313,7 @@ def _save_unit_attention_maps(
     out_path: Path,
     write_mode: str,
     compression: str,
+    model_num_heads: int,
     writer_queue_size: int = 2,
 ) -> Dict[str, Any]:
     model.eval()
@@ -313,6 +343,7 @@ def _save_unit_attention_maps(
             "num_samples": num_samples,
             "write_mode": write_mode,
             "compression": compression,
+            "model_num_heads": model_num_heads,
             "pending_writes": pending_writes,
             "writer_state": writer_state,
         },
@@ -343,17 +374,24 @@ def _save_unit_attention_maps(
                         "Ensure --attn_maps is enabled and decoder layers are present."
                     )
 
-                # Expected shape for each decoder layer: [B, H, Q, T]
+                # Accept either head-averaged [B, Q, T] or per-head [B, H, Q, T].
                 layer_attn = attn_maps[0]
                 if layer_attn is None:
                     raise RuntimeError("Received None attention map for decoder layer 0.")
 
-                layer_attn = np.ascontiguousarray(
-                    layer_attn.detach().to(dtype=torch.float16).cpu().numpy()
-                )
-                if layer_attn.ndim != 4:
+                layer_attn, saved_num_heads, head_aggregation = _prepare_attention_batch(layer_attn)
+                if "saved_num_heads" not in writer_state:
+                    writer_state["saved_num_heads"] = int(saved_num_heads)
+                    writer_state["head_aggregation"] = head_aggregation
+                elif (
+                    writer_state["saved_num_heads"] != int(saved_num_heads)
+                    or writer_state["head_aggregation"] != head_aggregation
+                ):
                     raise RuntimeError(
-                        f"Unexpected attention map rank {layer_attn.ndim}; expected 4 [B, H, Q, T]."
+                        "Attention map shape changed across batches. "
+                        f"Expected saved_num_heads={writer_state['saved_num_heads']} "
+                        f"and head_aggregation={writer_state['head_aggregation']}, got "
+                        f"saved_num_heads={saved_num_heads} and head_aggregation={head_aggregation}."
                     )
 
                 bsz = int(layer_attn.shape[0])
@@ -408,6 +446,9 @@ def _save_unit_attention_maps(
         "path": str(out_path),
         "num_samples": int(writer_state["num_written"]),
         "attn_shape_per_sample": writer_state["attn_shape"],
+        "saved_num_heads": int(writer_state.get("saved_num_heads", 0)),
+        "model_num_heads": int(model_num_heads),
+        "attention_head_aggregation": str(writer_state.get("head_aggregation", "unknown")),
     }
 
 
@@ -473,6 +514,7 @@ def main() -> None:
             out_path=out_file,
             write_mode=args.attn_write_mode,
             compression=args.attn_compression,
+            model_num_heads=int(args.nheads),
         )
         manifest_units.append(summary)
         accelerator.print(

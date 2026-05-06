@@ -44,6 +44,12 @@ legacy/
 ckpt/
 wandb/
 attn_maps/
+attn_map_analysis/figures/
+attn_map_analysis/results/
+attn_map_analysis/roi_labels/
+attn_map_analysis/tables/
+notebooks/figures/
+notebooks/tables/
 kernel.json
 AGENT.md
 

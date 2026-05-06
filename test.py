@@ -68,6 +68,10 @@ def _fmt(x):
     return f"{x:.6f}" if x is not None else "None"
 
 
+def _acc_vector_from_stats(stats: Dict[str, object]) -> np.ndarray:
+    return np.asarray(stats["test_acc_vector"], dtype=np.float32)
+
+
 def _normalize_split_spec(spec):
     if spec is None:
         return []
@@ -135,6 +139,7 @@ def main() -> None:
     accelerator.print(f"Evaluating checkpoint: {args.resume}")
 
     per_movie: Dict[str, Dict[str, float]] = {}
+    per_movie_acc_vectors: Dict[str, np.ndarray] = {}
     movie_losses: List[float] = []
     movie_accs: List[float] = []
 
@@ -147,11 +152,14 @@ def main() -> None:
             target_subj=args.target_subj,
             split_name="test",
             return_predictions=False,
+            return_acc_vector=args.save_encoding_acc,
             max_batches=args.sanity_batches if args.pipeline_sanity_check else None,
         )
 
         movie_loss = _safe_float(stats.get("test_loss"))
         movie_acc = _safe_float(stats.get("test_acc"))
+        if args.save_encoding_acc:
+            per_movie_acc_vectors[movie] = _acc_vector_from_stats(stats)
 
         if movie_loss is not None:
             movie_losses.append(movie_loss)
@@ -181,6 +189,7 @@ def main() -> None:
         target_subj=args.target_subj,
         split_name="test",
         return_predictions=False,
+        return_acc_vector=args.save_encoding_acc,
         max_batches=args.sanity_batches if args.pipeline_sanity_check else None,
     )
 
@@ -190,6 +199,7 @@ def main() -> None:
         "split": args.test_splits,
         "num_samples": len(all_test_loader.dataset),
     }
+    overall_acc_vector = _acc_vector_from_stats(overall_stats) if args.save_encoding_acc else None
 
     accelerator.print("=" * 60)
     accelerator.print(
@@ -211,6 +221,14 @@ def main() -> None:
             "macro_average": macro_avg,
             "overall": overall,
         }
+        if args.save_encoding_acc:
+            for unit_name, acc_vector in per_movie_acc_vectors.items():
+                acc_path = output_dir / f"{unit_name}_{args.readout_res}_acc.npy"
+                np.save(acc_path, np.asarray(acc_vector, dtype=np.float32))
+                accelerator.print(f"Saved encoding accuracy vector to {acc_path}")
+            overall_acc_path = output_dir / f"test_{args.readout_res}_acc.npy"
+            np.save(overall_acc_path, np.asarray(overall_acc_vector, dtype=np.float32))
+            accelerator.print(f"Saved encoding accuracy vector to {overall_acc_path}")
         if args.save_test_causal_intervention:
             all_modalities = {"video", "audio", "text"}
             removed = all_modalities - set(args.modality)

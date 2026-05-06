@@ -6,14 +6,14 @@ set -euo pipefail
 #   bash ./scripts/eval.sh
 
 # SUBJECTS=(1 2 3 5 1 2 3 5 1 2 3 5 1 2 3 5)
-SUBJECTS=(1 2 3 5)
+SUBJECTS=(1 2 3 5 1 2 3 5)
 # SUBJECTS=(1)
 
 RESUMES=(
-  # "ckpt/1/04-18-2026-01-08/best.pt" # video audio text
-  # "ckpt/2/04-18-2026-01-14/best.pt" # video audio text
-  # "ckpt/3/04-18-2026-22-20/best.pt" # video audio text
-  # "ckpt/5/04-18-2026-22-22/best.pt" # video audio text
+  "ckpt/1/04-18-2026-01-08/best.pt" # video audio text
+  "ckpt/2/04-18-2026-01-14/best.pt" # video audio text
+  "ckpt/3/04-18-2026-22-20/best.pt" # video audio text
+  "ckpt/5/04-18-2026-22-22/best.pt" # video audio text
   # "ckpt/1/04-15-2026-19-12/best.pt" # video
   # "ckpt/2/04-15-2026-19-10/best.pt" # video
   # "ckpt/3/04-15-2026-19-10/best.pt" # video 
@@ -50,20 +50,17 @@ MODALITIES=(
   "video audio text"
   "video audio text"
   "video audio text"
-  # "video"
-  # "video"
-  # "video"
-  # "video"
-  # "audio"
-  # "audio"
-  # "audio"
-  # "audio"
-  # "text"
-  # "text"
-  # "text"
-  # "text"
+  "video audio text"
+  "video audio text"
+  "video audio text"
+  "video audio text"
 )
+
 READOUTS=(
+  "parcels"
+  "parcels"
+  "parcels"
+  "parcels"
   "voxels"
   "voxels"
   "voxels"
@@ -77,7 +74,7 @@ TEXT_BACKBONE="deberta"
 # READOUT_FMRI="voxels" # "parcels" or "voxels"
 # MODALITY="video audio text"
 
-BATCH_SIZE=16
+BATCH_SIZE=8
 NUM_WORKERS=4
 TEST_SPLITS="movie10-ood-default"
 
@@ -122,5 +119,6 @@ for i in "${!SUBJECTS[@]}"; do
     --nheads "$NHEADS" \
     --num_queries "$NUM_QUERIES" \
     --readout_res "$readout" \
+    --save_encoding_acc \
     --save_test_movie_breakdown
 done

@@ -219,7 +219,8 @@ class TransformerDecoder(nn.Module):
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
             if self.return_attn_maps:
-                attn_maps.append(attn_map) # attn_map: [batch, heads, num_queries, memory_tokens]
+                # With `average_attn_weights=True`, attn_map is [batch, num_queries, memory_tokens].
+                attn_maps.append(attn_map)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -344,7 +345,7 @@ class TransformerDecoderLayer(nn.Module):
                                    value=memory, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask,
                                    need_weights=True,
-                                   average_attn_weights=False)
+                                   average_attn_weights=True)
         else:
             tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
                                    key=self.with_pos_embed(memory, pos),
@@ -418,7 +419,7 @@ class TransformerDecoderLayer(nn.Module):
                                    value=memory, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask,
                                    need_weights=True,
-                                   average_attn_weights=False)
+                                   average_attn_weights=True)
         else:
             tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
                                    key=self.with_pos_embed(memory, pos),

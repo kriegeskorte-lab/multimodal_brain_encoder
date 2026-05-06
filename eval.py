@@ -18,6 +18,7 @@ def evaluate(
     target_subj: int,
     split_name: str = "val",
     return_predictions: bool = False,
+    return_acc_vector: bool = False,
     max_batches: Optional[int] = None,
 ) -> Dict[str, object]:
     model.eval()
@@ -67,18 +68,30 @@ def evaluate(
             preds_all.append(gathered_pred.float().cpu().numpy())
 
     result: Dict[str, object] = {}
+    acc_vector = None
+
+    if return_acc_vector:
+        split_acc, acc_tensor = pearson_meter.finalize_with_vector(accelerator)
+        acc_vector = acc_tensor.detach().float().cpu().numpy().astype(np.float32, copy=False)
+    else:
+        split_acc = pearson_meter.finalize(accelerator)
 
     if split_name == "val":
         result["val_loss"] = reduce_running_mean(loss_meter, accelerator)
-        result["val_acc"] = pearson_meter.finalize(accelerator)
+        result["val_acc"] = split_acc
+        if return_acc_vector:
+            result["val_acc_vector"] = acc_vector
     elif split_name == "test":
         result["test_loss"] = reduce_running_mean(loss_meter, accelerator)
-        result["test_acc"] = pearson_meter.finalize(accelerator)
+        result["test_acc"] = split_acc
+        if return_acc_vector:
+            result["test_acc_vector"] = acc_vector
     else:
         split_loss = reduce_running_mean(loss_meter, accelerator)
-        split_acc = pearson_meter.finalize(accelerator)
         result[f"{split_name}_loss"] = split_loss
         result[f"{split_name}_acc"] = split_acc
+        if return_acc_vector:
+            result[f"{split_name}_acc_vector"] = acc_vector
 
     if return_predictions:
         if preds_all:

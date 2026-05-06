@@ -33,6 +33,8 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--save_test_predictions", action="store_true")
 	parser.add_argument("--save_test_movie_breakdown", action="store_true")
 	parser.add_argument("--save_test_causal_intervention", action="store_true")
+	parser.add_argument("--save_encoding_acc", dest="save_encoding_acc", action="store_true", default=True)
+	parser.add_argument("--no_save_encoding_acc", "--no-save-encoding-acc", dest="save_encoding_acc", action="store_false")
 
     # Data/model hyperparameters
 	parser.add_argument("--subj", "--sub", "--train_subj", dest="subj", default=1, type=int)
