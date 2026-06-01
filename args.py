@@ -40,7 +40,6 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--subj", "--sub", "--train_subj", dest="subj", default=1, type=int)
 	parser.add_argument("--target_subj", "--eval_subj", dest="target_subj", default=1, type=int)
 	parser.add_argument("--readout_res", choices=["parcels", "voxels"], default="parcels", type=str)
-	parser.add_argument("--num_queries", default=1000, type=int)
 	parser.add_argument("--num_frames", default=16, type=int)
 	parser.add_argument("--num_parcels", default=1000, type=int)
 	parser.add_argument("--num_voxels", default=122721, type=int)
@@ -50,7 +49,10 @@ def get_args_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--audio_backbone", default="whisper", type=str)
 	parser.add_argument("--text_backbone", default="metaclip", type=str)
 
+	parser.add_argument("--baseline", action="store_true", help="Whether to use the baseline (non-transformer) perceptual aligner.")
+
     # Transformer hyperparameters in neuro_encoder.py
+	parser.add_argument("--num_queries", default=1000, type=int)
 	parser.add_argument("--enc_layers", default=0, type=int)
 	parser.add_argument("--dec_layers", default=1, type=int)
 	parser.add_argument("--dim_feedforward", default=512, type=int)

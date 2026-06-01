@@ -419,6 +419,136 @@ class PerceptualAligner(nn.Module):
         outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
         return self.output_norm(outputs), attn_maps
     
+class PerceptualAlignerBaseline(nn.Module):
+    """Cross-attention baseline over averaged modality tokens."""
+
+    MODALITY_TO_INDEX = {
+        "video": 0,
+        "audio": 1,
+        "text": 2,
+    }
+
+    def __init__(self, args):
+        super().__init__()
+
+        self.args = args
+        self.modality = args.modality
+        self.d_model = args.hidden_dim
+        self.num_queries = args.num_queries
+        self.modality_dropout_prob = float(getattr(args, "modality_dropout", 0.2))
+        self.output_norm = nn.LayerNorm(self.d_model)
+        self.transformer = build_transformer(args)
+        self.query_embed = nn.Embedding(self.num_queries, self.d_model)
+        self.modality_pos_embedding = nn.Embedding(3, self.d_model)
+
+    def _flatten_tokens(self, name: str, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim == 4:
+            B, F_, S, D = tokens.shape
+            tokens = tokens.reshape(B, F_ * S, D)
+        elif tokens.ndim != 3:
+            raise ValueError(
+                f"{name} tokens must have shape [B, T, D] or [B, F, S, D], "
+                f"got {tuple(tokens.shape)}"
+            )
+
+        if tokens.shape[-1] != self.d_model:
+            raise ValueError(
+                f"{name} token dim={tokens.shape[-1]} does not match "
+                f"hidden_dim={self.d_model}"
+            )
+
+        return tokens
+
+    def _configured_modalities(self) -> list[str]:
+        known_modalities = tuple(self.MODALITY_TO_INDEX.keys())
+        requested_modalities = (
+            (self.modality,) if isinstance(self.modality, str) else tuple(self.modality)
+        )
+        configured_modalities = [
+            name for name in known_modalities if name in requested_modalities
+        ]
+        unsupported_modalities = [
+            name for name in requested_modalities if name not in known_modalities
+        ]
+        if unsupported_modalities:
+            raise ValueError(
+                "Unsupported baseline modalities: "
+                f"{', '.join(unsupported_modalities)}"
+            )
+
+        if len(configured_modalities) == 0:
+            raise ValueError("No configured modalities for baseline aligner.")
+
+        return configured_modalities
+
+    def _modality_keep_mask(
+        self,
+        batch_size: int,
+        num_modalities: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if not self.training or self.modality_dropout_prob <= 0:
+            return torch.ones(batch_size, num_modalities, device=device, dtype=torch.bool)
+
+        keep = torch.rand(batch_size, num_modalities, device=device) > self.modality_dropout_prob
+
+        # Ensure at least one modality remains available to cross-attention.
+        all_dropped = ~keep.any(dim=1)
+        if all_dropped.any():
+            idx = all_dropped.nonzero(as_tuple=False).squeeze(1)
+            rescue = torch.randint(0, num_modalities, (idx.numel(),), device=device)
+            keep[idx, rescue] = True
+
+        return keep
+
+    def forward(self, x: dict[str, torch.Tensor]) -> tuple[torch.Tensor, Any]:
+        configured_modalities = self._configured_modalities()
+        missing_modalities = [
+            name for name in configured_modalities if x.get(name, None) is None
+        ]
+        if missing_modalities:
+            raise ValueError(
+                "Missing required baseline modalities: "
+                f"{', '.join(missing_modalities)}"
+            )
+
+        modality_tokens = []
+        modality_ids = []
+        batch_size = None
+
+        for name in configured_modalities:
+            tokens = self._flatten_tokens(name, x[name])
+            if batch_size is None:
+                batch_size = tokens.shape[0]
+            elif tokens.shape[0] != batch_size:
+                raise ValueError("All modality tokens must have the same batch size.")
+
+            modality_tokens.append(tokens.mean(dim=1))
+            modality_ids.append(self.MODALITY_TO_INDEX[name])
+
+        memory_tokens = torch.stack(modality_tokens, dim=1)  # [B, M, D]
+        B, M, _ = memory_tokens.shape
+        device = memory_tokens.device
+
+        keep_mask = self._modality_keep_mask(B, M, device)
+        src_mask = (~keep_mask).to(device=device, dtype=torch.bool)  # [B, M]
+
+        src = memory_tokens.transpose(1, 2).unsqueeze(-1)  # [B, D, M, 1]
+        modality_ids = torch.as_tensor(modality_ids, device=device, dtype=torch.long)
+        modality_pos = self.modality_pos_embedding(modality_ids)  # [M, D]
+        pos_embed = modality_pos.transpose(0, 1).unsqueeze(0).unsqueeze(-1)  # [1, D, M, 1]
+
+        hidden_states, attn_maps = self.transformer(
+            src=src,
+            mask=src_mask,
+            query_embed=self.query_embed.weight,
+            pos_embed=pos_embed,
+            masks=False,
+        )
+
+        outputs = hidden_states[-1] if hidden_states.dim() == 4 else hidden_states
+        return self.output_norm(outputs), attn_maps
+
 
 class Readout(nn.Module):
     """Readout module that predicts fMRI from aligned token representations."""
@@ -507,7 +637,10 @@ class NeuroEncoder(nn.Module):
         # Final output dimensionality (main.py sets num_queries from readout_res)
         self.fmri_out_dim = args.num_queries
         self.sensor = Sensor(args)
-        self.perceptual_aligner = PerceptualAligner(args)
+        if args.baseline:
+            self.perceptual_aligner = PerceptualAlignerBaseline(args)
+        else:
+            self.perceptual_aligner = PerceptualAligner(args)
         self.readout = Readout(args, self.d_model, self.fmri_out_dim)
 
     def forward(self, samples: NestedTensor):
@@ -610,4 +743,3 @@ if __name__ == "__main__":
 
     print("All pseudo-data shape checks passed.")
     
-

@@ -160,7 +160,7 @@ class ProcessorWrapper:
 
     def process(self, data: Any, **kwargs: Any) -> TensorLikeDict:
         if self.modality == "text":
-            max_length = 77 if self.backbone in ["metaclip", "openaiclip"] else 512
+            max_length = 77 if self.backbone in ["metaclip", "openaiclip"] else 128
             return self.processor(
                 text=data,
                 padding="max_length",

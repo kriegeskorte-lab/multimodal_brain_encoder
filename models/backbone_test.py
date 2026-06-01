@@ -1,19 +1,23 @@
 BACKBONE_LIST = {
-    'text': {
-        "llama": "meta-llama/Llama-3.2-1B", 
-        "deberta": "microsoft/deberta-v3-large", 
-        "metaclip": "facebook/metaclip-2-worldwide-m16"},
-    'video': {
-        "timesformer": "facebook/timesformer-base-finetuned-k400", 
-        # "vivit": "google/vivit-b-16x2-kinetics400", # 32 frames
-        "videomae": "OpenGVLab/VideoMAEv2-Base", 
-        "dino": "facebook/dinov3-vitb16-pretrain-lvd1689m", 
-        "metaclip": "facebook/metaclip-2-worldwide-m16"},
-    'audio': {
-        "wav2vec2": "facebook/wav2vec2-base-960h", 
-        "whisper": "openai/whisper-small"}
+    "text": {
+        "llama": "meta-llama/Llama-3.2-1B",
+        "deberta": "microsoft/deberta-v3-base",
+        "metaclip": "facebook/metaclip-2-worldwide-l14",
+        "openaiclip": "openai/clip-vit-large-patch14"
+    },
+    "video": {
+        "timesformer": "facebook/timesformer-base-finetuned-k400",
+        "videomae": "OpenGVLab/VideoMAEv2-Base",
+        "dino": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+        "metaclip": "facebook/metaclip-2-worldwide-b16",
+        "openaiclip": "openai/clip-vit-large-patch14"
+        # "eupe": "facebook/EUPE-ViT-B",
+    },
+    "audio": {
+        "wav2vec": "facebook/w2v-bert-2.0",
+        "whisper": "openai/whisper-small",
+    },
 }
-
 
 CACHE_DIR = "/engram/nklab/models/hf_cache"
 
@@ -67,7 +71,7 @@ if __name__ == "__main__":
     audio_2 = preprocess_audio(audio_2, sr)
     audio_samples = [audio_1, audio_2]
 
-    audio_backbone = "wav2vec2"  # "wav2vec2" or "whisper"
+    audio_backbone = "wav2vec"  # "wav2vec2" or "whisper"
     model_name = BACKBONE_LIST['audio'][audio_backbone]
     print(f"Testing {audio_backbone} audio backbone with model: {model_name}")
     if audio_backbone == "whisper":
